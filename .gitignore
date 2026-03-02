@@ -1,0 +1,25 @@
+#Rust / Cargo
+
+/target
+Cargo.lock
+
+#Environment and Secrets
+
+.env
+*.pem
+
+#IDEs
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+#OS Stuff that we don't care about
+
+.DS_Store
+Thumbs.db
+
+#Docker
+
+.dockerignore

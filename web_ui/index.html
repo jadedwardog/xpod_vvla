@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>xpod Vector Server</title>
+    <link rel="stylesheet" href="/style/main.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>xpod Visual-Language-Action Server</h1>
+            <p>Hub-and-spoke management interface</p>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h2>Server Status</h2>
+                <p><span class="status-indicator"></span>Online</p>
+                <p>Port: 3000</p>
+            </div>
+
+            <div class="card">
+                <h2>Vector Connections</h2>
+                <p>Currently waiting for telemetry streams...</p>
+                <!-- Future: Inject active robot data here via WebSockets -->
+            </div>
+        </div>
+    </div>
+    <script src="/scripts/main.js"></script>
+</body>
+</html>
