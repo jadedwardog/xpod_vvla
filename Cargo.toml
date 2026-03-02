@@ -16,10 +16,18 @@ axum = "0.7"
 tower-http = { version = "0.5", features = ["fs"] }
 dotenvy = "0.15"
 
-# For API endpoints and HTTPS certificate download
+# Networking and Serialisation stack
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+# AI Stack
+candle-core = "0.3.1"
+candle-nn = "0.3.1"
+candle-transformers = "0.3.1"
+tokenizers = "0.15.0"
+image = "0.24.7"
+hf-hub = "0.3.2"
 
 [build-dependencies]
 tonic-build = "0.10"
