@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package anki.vector.setup;
+
+message RtsConnectionRequest {
+    string pin = 1;
+}
+
+message RtsWifiConnectRequest {
+    string ssid_hex = 1;
+    string password = 2;
+    int32 auth_type = 3;
+    int32 timeout = 4;
+}
+
+message RtsStatusResponse {
+    int32 wifi_state = 1;
+    int32 access_point_type = 2;
+    string ssid = 3;
+    uint32 ip_v4 = 4;
+}
