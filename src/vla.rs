@@ -2,8 +2,7 @@ use candle_core::{Device, Tensor};
 use std::error::Error;
 
 pub struct VlaModel {
-    device: Device,
-    // Add weights and configuration here
+    _device: Device,
 }
 
 impl VlaModel {
@@ -17,16 +16,14 @@ impl VlaModel {
         };
 
         println!("Initialising VLA module on device: {:?}", device);
-        Ok(Self { device })
+        Ok(Self { _device: device })
     }
 
     pub fn process_frame(&self, _frame_data: &[u8]) -> Result<Tensor, Box<dyn Error>> {
-        // Logic to convert raw camera bytes to normalised tensors for VLA input
         todo!("Implement image to tensor conversion")
     }
 
     pub fn predict_action(&self, _visual_tensor: &Tensor, _instruction: &str) -> Result<Vec<f32>, Box<dyn Error>> {
-        // Logic to generate motor control tokens from image + text input
         todo!("Implement VLA inference loop")
     }
 }

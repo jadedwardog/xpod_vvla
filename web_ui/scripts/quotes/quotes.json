@@ -1,0 +1,102 @@
+{
+  "scan_start": [
+    "I am looking for Sarah Connor.",
+    "Where we are going, we do not need roads.",
+    "I feel the need, the need for speed."
+  ],
+  "device_selected": [
+    "You are the disease, and I am the cure.",
+    "I choose you!",
+    "You are the One."
+  ],
+  "connect_attempt": [
+    "It is alive!",
+    "Hold on to your butts...",
+    "Here is looking at you, kid."
+  ],
+  "connect_drop": [
+    "We are gonna need a bigger boat.",
+    "I have a bad feeling about this.",
+    "It is a trap!"
+  ],
+  "connect_fail": [
+    "Houston, we have a problem.",
+    "Game over, man! Game over!",
+    "Failure is not an option."
+  ],
+  "disconnect": [
+    "I will be back.",
+    "Hasta la vista, baby.",
+    "Frankly, my dear, I do not give a damn."
+  ],
+  "characteristics_found": [
+    "Elementary, my dear Watson.",
+    "Show me the money!",
+    "I see dead people."
+  ],
+  "notifications_active": [
+    "It is working! It is working!",
+    "To infinity and beyond!",
+    "She may not look like much, but she has got it where it counts, kid."
+  ],
+  "msg_received": [
+    "What is in the box?!",
+    "You talkin' to me?",
+    "Here's Johnny!"
+  ],
+  "handshake_accepted": [
+    "You have chosen... wisely.",
+    "You complete me.",
+    "I think this is the beginning of a beautiful friendship."
+  ],
+  "clad_received": [
+    "Show me the money!",
+    "Say hello to my little friend.",
+    "I love the smell of napalm in the morning."
+  ],
+  "key_received": [
+    "I have the codes.",
+    "The matrix is everywhere.",
+    "Keep your friends close, but your enemies closer."
+  ],
+  "secret_derived": [
+    "I love it when a plan comes together.",
+    "Magic Mirror on the wall...",
+    "There is no place like home."
+  ],
+  "send_key": [
+    "Say hello to my little friend.",
+    "Go ahead, make my day.",
+    "Yippee-ki-yay."
+  ],
+  "nonces_received": [
+    "Chewie, we are home.",
+    "Nobody puts Baby in a corner.",
+    "E.T. phone home."
+  ],
+  "pairing_cancelled": [
+    "I will be back.",
+    "Forget it, Jake, it is Chinatown.",
+    "I am altering the deal. Pray I do not alter it any further."
+  ],
+  "send_version": [
+    "Make it so.",
+    "Engage.",
+    "Do, or do not. There is no try."
+  ],
+  "error_general": [
+    "I am sorry, Dave. I am afraid I cannot do that.",
+    "You cannot pass!",
+    "My precious."
+  ],
+  "send_single": [
+    "One ping only, please.",
+    "Just keep swimming.",
+    "I will have what she is having."
+  ],
+  "send_chunk": [
+    "Hold on to your butts...",
+    "Fasten your seatbelts. It is going to be a bumpy night.",
+    "Buckle up, Dorothy, because Kansas is going bye-bye."
+  ]
+}

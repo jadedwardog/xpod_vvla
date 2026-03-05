@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <style>
+    .eye { 
+      fill: var(--eye-color, #4ade80); 
+      transition: fill 0.3s ease;
+    }
+  </style>
+  <rect class="eye" x="15" y="30" width="30" height="40" rx="8" />
+  <rect class="eye" x="55" y="30" width="30" height="40" rx="8" />
+</svg>

@@ -3,30 +3,47 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>xpod Vector Server</title>
+    <title>xpod Visual-Language-Action Server</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <link rel="stylesheet" href="/style/main.css">
+    
+    <script src="/scripts/protobuf.min.js"></script>
+    <script src="/scripts/libsodium-wrappers.js"></script>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>xpod Vector-Visual-Language-Action-Server (VVLAS)</h1>
-            <p>Hub-and-spoke management interface</p>
+    <div class="eyes-container" id="eyes-display">
+        <div class="orb-core">
+            <div class="orb-sphere"></div>
+            <div class="orb-flare f1"></div>
+            <div class="orb-flare f2"></div>
+            <div class="orb-flare f3"></div>
         </div>
-
-        <div class="grid">
-            <div class="card">
-                <h2>Server Status</h2>
-                <p><span class="status-indicator"></span>Online</p>
-                <p>Port: 3000</p>
-            </div>
-
-            <div class="card">
-                <h2>Vector Connections</h2>
-                <p>Currently waiting for telemetry streams...</p>
-                <!-- Future: Inject active robot data here via WebSockets -->
-            </div>
+        <div class="orbit-system">
+            <div class="orbital-plane plane-1"><div class="electron"></div></div>
+            <div class="orbital-plane plane-2"><div class="electron"></div></div>
+            <div class="orbital-plane plane-3"><div class="electron"></div></div>
         </div>
     </div>
-    <script src="/scripts/main.js"></script>
+
+    <div class="bottom-status">
+        <div class="title">DASHBOARD</div>
+        <div class="version">v: v0.0.1-a</div>
+    </div>
+
+    <nav class="right-menu">
+        <a href="#" class="nav-item" data-target="server-settings">SERVER SETTINGS [⚙]</a>
+        <a href="#" class="nav-item" data-target="bot-settings">BOT SETTINGS [◫]</a>
+        <a href="#" class="nav-item" data-target="bot-setup">BOT SETUP [▶]</a>
+        <a href="#" class="nav-item" data-target="custom-intents">CUSTOM INTENTS [MIC]</a>
+        <a href="#" class="nav-item" data-target="logs">LOGS [TXT]</a>
+        <a href="#" class="nav-item" data-target="version-info">VERSION INFO [i]</a>
+        <a href="#" class="nav-item" data-target="ui-settings">UI SETTINGS [\]</a>
+    </nav>
+
+    <div id="dynamic-setup-container" class="sci-fi-panel" style="display: none;"></div>
+    
+    <script src="/scripts/quotes/quotes.js"></script>
+    <script src="/scripts/bots/vector.js"></script>
+    <script src="/scripts/app.js"></script>
 </body>
 </html>
