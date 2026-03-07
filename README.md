@@ -1,6 +1,6 @@
-# **xpod: Vector Visual-Language-Action Server**
+# **xpod: Visual-Language-Action Server**
 ## **Overview**
-xpod is a high-performance, hub-and-spoke server designed to manage multiple Anki Vector robots. Written entirely in Rust, it bypasses legacy SDKs to interact directly with Vector's internal clank API via gRPC and mutual TLS.
+xpod is a high-performance, hub-and-spoke server designed to manage multiple robots including Anki Vector. Written entirely in Rust, it bypasses legacy SDKs to interact directly with each robot's internal clank API via gRPC and mutual TLS.
 
 The server acts as an inference routing hub, extracting high-frequency sensor data and passing it to distinct Vision-Language-Action models to generate discrete motor control tokens.
 
