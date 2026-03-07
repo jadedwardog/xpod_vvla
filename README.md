@@ -1,15 +1,21 @@
 # **xpod: Visual-Language-Action Server**
 ## **Overview**
-xpod is a high-performance, hub-and-spoke server designed to manage multiple robots including Anki Vector. Written entirely in Rust, it bypasses legacy SDKs to interact directly with each robot's internal clank API via gRPC and mutual TLS.
-
-The server acts as an inference routing hub, extracting high-frequency sensor data and passing it to distinct Vision-Language-Action models to generate discrete motor control tokens.
+xpod is designed to support multiple embodied agents, each associated with a physical robot such as an Anki Vector. The goal is to create persistent, individual “souls” that inhabit these devices. Each soul maintains its own emotional state, memory, personality, and behavioural tendencies, while sharing a common cognitive infrastructure. The system is self‑hosted, open source, and built around a Rust monolith that coordinates all higher‑level cognition.
 
 ## **Architecture**
-The application is built on the Tokio asynchronous runtime and Tonic gRPC implementation to ensure deterministic performance and memory safety.
-* Manages concurrent mTLS streams for multiple Vector bots, injecting the unique guid authorization token into gRPC interceptors without blocking the execution thread.
-* Buffers the raw CameraFeedResponse and AudioFeedResponse byte streams.
-* Maps discrete inference actions back to the Anki motor control protobufs, ensuring strict adherence to the robot's behavior control lock hierarchy.
-* Organises bot types as sidecars
+The architecture separates the mind from the body. The monolith contains the cognitive and emotional logic, while each robot type is supported by a dedicated sidecar responsible for hardware‑specific operations. This separation allows the same cognitive framework to drive different robot types without modifying the core system.
+
+Each robot type has its own sidecar. A sidecar is a small service responsible for all hardware‑level communication. It handles device discovery, telemetry collection, movement commands, audio playback, camera streaming, and any other device‑specific behaviour.
+
+The sidecar exposes a stable API to the monolith. This API includes endpoints for sending actions, receiving telemetry, and querying capabilities. Because the monolith communicates only through this abstract interface, new robot types can be added without modifying the cognitive core.
+
+The sidecar also reports physical state to the monolith. This includes battery level, temperature, CPU load, motor temperature, network quality, and uptime. These values form the basis of the agent’s BodyState.
+
+Each agent maintains two internal models: BodyState and EmotionState.
+
+BodyState reflects the physical condition of the robot. It is updated continuously from sidecar telemetry. Low battery, high temperature, heavy CPU load, long uptime, and poor network quality all influence the BodyState.
+
+EmotionState represents the agent’s internal affective condition. It includes variables such as valence, arousal, confidence, curiosity, attachment, stress, and patience. These values drift over time and are influenced by user interactions, task outcomes, and BodyState.
 
 ## **Prerequisites**
 * Rust toolchain  
