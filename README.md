@@ -9,6 +9,7 @@ The application is built on the Tokio asynchronous runtime and Tonic gRPC implem
 * Manages concurrent mTLS streams for multiple Vector bots, injecting the unique guid authorization token into gRPC interceptors without blocking the execution thread.
 * Buffers the raw CameraFeedResponse and AudioFeedResponse byte streams.
 * Maps discrete inference actions back to the Anki motor control protobufs, ensuring strict adherence to the robot's behavior control lock hierarchy.
+* Organises bot types as sidecars
 
 ## **Prerequisites**
 * Rust toolchain  

@@ -1,33 +1,19 @@
-[package]
-name = "xpod"
+[workspace]
+members = [
+    "xpod-core",
+    "xpod-vector"
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.0.1-a"
 edition = "2024"
 authors = ["wardog <wardog.x82@gmail.com>"]
-description = "Vector Visual-Language-Action Server"
 
-[dependencies]
-tokio = { version = "1.35", features = ["macros", "rt-multi-thread", "sync", "signal"] }
-tonic = { version = "0.10", default-features = false, features = ["prost", "codegen", "tls", "tls-webpki-roots"] }
-prost = "0.12"
-prost-types = "0.12"
-tokio-stream = "0.1"
-rustls-pemfile = "2.0"
+[workspace.dependencies]
+tokio = { version = "1.35", features = ["macros", "rt-multi-thread", "sync", "signal", "process"] }
 axum = "0.7"
-tower-http = { version = "0.5", features = ["fs"] }
-dotenvy = "0.15"
-
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-
-candle-core = "0.8.2"
-candle-nn = "0.8.2"
-candle-transformers = "0.8.2"
-tokenizers = "0.19.1"
-image = "0.24.7"
-hf-hub = { version = "0.4.1", default-features = false, features = ["rustls-tls"] }
-
-[build-dependencies]
-tonic-build = "0.10"
-prost-build = "0.12"
-protobuf-src = "1.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+dotenvy = "0.15"
