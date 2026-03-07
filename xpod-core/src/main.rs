@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::path::{Path, PathBuf};
 use axum::{routing::{post, any}, Router, Json, response::{IntoResponse, Response}, extract::Path as AxumPath, http::{Request, StatusCode}, body::Body};
 use tower_http::services::ServeDir;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use reqwest::Client;
 use axum_server::tls_rustls::RustlsConfig;
 use tokio::process::Command;
@@ -17,6 +17,12 @@ pub mod stt;
 #[derive(Deserialize)]
 struct ProvisionPayload {
     ip: String,
+}
+
+#[derive(Serialize)]
+struct SessionResponse {
+    session_token: String,
+    user_id: String,
 }
 
 async fn handle_provision(Json(payload): Json<ProvisionPayload>) -> impl IntoResponse {
@@ -46,6 +52,15 @@ async fn handle_provision(Json(payload): Json<ProvisionPayload>) -> impl IntoRes
     "Failed to retrieve certificate".into_response()
 }
 
+async fn handle_sessions() -> impl IntoResponse {
+    println!("xpod Core: Robot requested cloud session validation. Blindly authorising.");
+    
+    Json(SessionResponse {
+        session_token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.t-X6s96Yy8939s894ksjdhfskjhf-dummy".to_string(),
+        user_id: "xpod-user-0001".to_string(),
+    })
+}
+
 fn ensure_certificates_exist(cert_path: &Path, key_path: &Path, host: &str) -> Result<(), Box<dyn Error>> {
     if cert_path.exists() && key_path.exists() {
         return Ok(());
@@ -66,7 +81,7 @@ async fn proxy_to_sidecar(
     req: Request<Body>,
 ) -> Response {
     let uri = format!("http://127.0.0.1:30302/{}", path);
-    println!("CORE PROXY: Forwarding request to sidecar -> {}", uri);
+    println!("CORE PROXY: Forwarding -> {}", uri);
     
     let client = Client::new();
     let method = req.method().clone();
@@ -113,6 +128,33 @@ async fn proxy_to_sidecar(
     }
 }
 
+async fn check_sidecar_health(uri: &str) -> bool {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(1))
+        .build()
+        .unwrap_or_default();
+
+    println!("xpod Core: Initialising sidecar health check at {}...", uri);
+
+    for i in 1..=10 {
+        match client.get(uri).send().await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    println!("xpod Core: Sidecar health check passed.");
+                    return true;
+                } else {
+                    println!("xpod Core: Sidecar health check returned status {} (attempt {}/10).", resp.status(), i);
+                }
+            }
+            Err(e) => {
+                println!("xpod Core: Sidecar connection attempt {} failed: {}.", i, e);
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    false
+}
+
 async fn run_server(ui_path: PathBuf) {
     let port = env::var("SERVER_PORT").unwrap_or_else(|_| "30301".to_string());
     let host = env::var("SERVER_HOST").unwrap_or_else(|_| "localhost".to_string());
@@ -129,13 +171,15 @@ async fn run_server(ui_path: PathBuf) {
     let config = match RustlsConfig::from_pem_file(&cert_path, &key_path).await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("CRITICAL: Failed to load TLS config from disk: {}", e);
+            eprintln!("CRITICAL: Failed to load TLS config: {}", e);
             std::process::exit(1);
         },
     };
 
     let app = Router::new()
         .route("/api/provision", post(handle_provision))
+        .route("/v1/sessions", post(handle_sessions))
+        .route("/api/robot/*path", any(proxy_to_sidecar))
         .route("/api/vector/*path", any(proxy_to_sidecar))
         .fallback_service(ServeDir::new(ui_path));
         
@@ -149,6 +193,33 @@ async fn run_server(ui_path: PathBuf) {
     }
 }
 
+fn find_sidecar_binary(name: &str) -> Option<PathBuf> {
+    let possible_paths = vec![
+        format!("./target/debug/{}", name),
+        format!("../target/debug/{}", name),
+        format!("./{}", name),
+    ];
+
+    println!("xpod Core: Searching for sidecar binary '{}'...", name);
+
+    for path_str in possible_paths {
+        let path = PathBuf::from(&path_str);
+        if path.exists() {
+            if path.is_file() {
+                if let Ok(abs_path) = fs::canonicalize(&path) {
+                    println!("xpod Core: Binary found at: {:?}", abs_path);
+                    return Some(abs_path);
+                }
+            } else if path.is_dir() {
+                println!("xpod Core: Checked {:?} - Found directory, skipping.", path);
+            }
+        } else {
+            println!("xpod Core: Checked {:?} - Not found.", path);
+        }
+    }
+    None
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     rustls::crypto::ring::default_provider()
@@ -159,55 +230,72 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     let cwd = env::current_dir()?;
     println!("xpod Core: Current working directory: {:?}", cwd);
-    
+
     let mut web_ui_path = cwd.join("web_ui");
     if !web_ui_path.exists() {
         web_ui_path = cwd.join("xpod-core").join("web_ui");
     }
 
     if !web_ui_path.exists() {
-        eprintln!("CRITICAL: web_ui directory not found in {:?} or xpod-core/web_ui", cwd);
+        eprintln!("CRITICAL: web_ui directory not found.");
         std::process::exit(1);
-    } else {
-        println!("xpod Core: web_ui directory resolved to {:?}", web_ui_path);
     }
 
-    let vector_ip = env::var("VECTOR_IP");
-    let vector_guid = env::var("VECTOR_GUID");
+    let binary_name = "xpod-vector";
+    let sidecar_path = match find_sidecar_binary(binary_name) {
+        Some(p) => p,
+        None => {
+            eprintln!("CRITICAL: Could not locate compiled binary '{}'.", binary_name);
+            eprintln!("Please run 'cargo build' from the workspace root to compile all members.");
+            std::process::exit(1);
+        }
+    };
     
-    if vector_ip.is_err() || vector_guid.is_err() {
-        println!("xpod Core: Initialising in Provisioning Mode.");
-        run_server(web_ui_path).await;
-        return Ok(());
-    }
-
-    println!("xpod Core: Initialising in Production Mode.");
-    let vector_ip = vector_ip.unwrap();
+    let vector_ip = env::var("VECTOR_IP").unwrap_or_default();
     let cert_path = env::var("VECTOR_CERT_PATH").unwrap_or_else(|_| "vector-cert.pem".to_string());
+
+    println!("xpod Core: Config: PORT=30302, IP={}, CERT={}", vector_ip, cert_path);
+
+    let sidecar_spawn_result = Command::new(&sidecar_path)
+        .env("VECTOR_IP", &vector_ip)
+        .env("VECTOR_CERT_PATH", &cert_path)
+        .env("SIDECAR_PORT", "30302")
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn();
+
+    let mut sidecar_process = match sidecar_spawn_result {
+        Ok(child) => {
+            if let Some(pid) = child.id() {
+                println!("xpod Core: Sidecar process started successfully (PID: {}).", pid);
+            }
+            child
+        },
+        Err(e) => {
+            eprintln!("CRITICAL: Failed to spawn sidecar at {:?}: {}.", sidecar_path, e);
+            std::process::exit(1);
+        }
+    };
+
+    if !check_sidecar_health("http://127.0.0.1:30302/ble/init").await {
+        eprintln!("CRITICAL: Sidecar failed health check after 10 retries. Cleaning up.");
+        let _ = sidecar_process.kill().await;
+        std::process::exit(1);
+    }
 
     let ui_task_path = web_ui_path.clone();
     tokio::spawn(async move {
         run_server(ui_task_path).await;
     });
 
-    let sidecar_bin = "./target/debug/xpod-vector";
-    println!("xpod Core: Spawning Vector sidecar process: {}", sidecar_bin);
-    
-    let mut sidecar = Command::new(sidecar_bin)
-        .env("VECTOR_IP", &vector_ip)
-        .env("VECTOR_CERT_PATH", &cert_path)
-        .env("SIDECAR_PORT", "30302")
-        .spawn()
-        .expect("Failed to start Vector sidecar process");
-
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
-            println!("xpod Core: Shutdown signal received. Cleaning up sidecar...");
-            let _ = sidecar.kill().await;
+            println!("xpod Core: Received shutdown signal. Terminating sidecar.");
+            let _ = sidecar_process.kill().await;
         }
-        status = sidecar.wait() => {
+        status = sidecar_process.wait() => {
             if let Ok(exit_status) = status {
-                eprintln!("xpod Core: Sidecar exited unexpectedly with status: {}", exit_status);
+                eprintln!("xpod Core: Sidecar process terminated unexpectedly: {}.", exit_status);
                 std::process::exit(exit_status.code().unwrap_or(1));
             }
         }

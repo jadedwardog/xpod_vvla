@@ -12,6 +12,9 @@ serde_json.workspace = true
 reqwest.workspace = true
 dotenvy.workspace = true
 
+tonic = { version = "0.10", default-features = false, features = ["prost", "codegen"] }
+prost = "0.12"
+
 rcgen = "0.12"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls = { version = "0.23", features = ["ring"] }

@@ -1,4 +1,4 @@
-use axum::{response::IntoResponse, Json};
+use axum::{response::IntoResponse, Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use blake2b_simd::Params;
 use hex;
@@ -16,7 +16,7 @@ pub struct ApiStatus {
 }
 
 #[derive(Deserialize)]
-pub struct HashPinRequest {
+pub struct HashRequest {
     pin: String,
     #[serde(rename = "sharedRx")]
     shared_rx: String,
@@ -25,11 +25,11 @@ pub struct HashPinRequest {
 }
 
 #[derive(Serialize)]
-pub struct HashPinResponse {
-    #[serde(rename = "rx_key")]
-    pub rx_key: String,
-    #[serde(rename = "tx_key")]
-    pub tx_key: String,
+pub struct HashResponse {
+    #[serde(rename = "hashedRx")]
+    pub hashed_rx: String,
+    #[serde(rename = "hashedTx")]
+    pub hashed_tx: String,
 }
 
 pub async fn init_ble() -> impl IntoResponse {
@@ -63,44 +63,30 @@ pub async fn send_pin() -> impl IntoResponse {
     })
 }
 
-pub async fn hash_pin(Json(payload): Json<HashPinRequest>) -> impl IntoResponse {
-    println!("SIDECAR [BLE]: Received Hash Request for PIN: {}", payload.pin);
+pub async fn hash_pin(Json(payload): Json<HashRequest>) -> impl IntoResponse {
+    let pin_bytes = payload.pin.as_bytes();
     
     let rx_bytes = match hex::decode(&payload.shared_rx) {
         Ok(b) => b,
-        Err(e) => {
-            eprintln!("SIDECAR [BLE]: RX Hex decode failed: {}", e);
-            return (axum::http::StatusCode::BAD_REQUEST, "Invalid RX hex").into_response();
-        }
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid sharedRx hex").into_response(),
     };
     
     let tx_bytes = match hex::decode(&payload.shared_tx) {
         Ok(b) => b,
-        Err(e) => {
-            eprintln!("SIDECAR [BLE]: TX Hex decode failed: {}", e);
-            return (axum::http::StatusCode::BAD_REQUEST, "Invalid TX hex").into_response();
-        }
+        Err(_) => return (StatusCode::BAD_REQUEST, "Invalid sharedTx hex").into_response(),
     };
 
-    println!("SIDECAR [BLE]: Inputs verified. Executing keyed Blake2b-256...");
+    let mut params = Params::new();
+    params.hash_length(32);
+    params.key(pin_bytes);
 
-    let rx_hashed = Params::new()
-        .hash_length(32)
-        .key(payload.pin.as_bytes())
-        .hash(&rx_bytes);
+    let hashed_rx = params.hash(&rx_bytes);
+    let hashed_tx = params.hash(&tx_bytes);
 
-    let tx_hashed = Params::new()
-        .hash_length(32)
-        .key(payload.pin.as_bytes())
-        .hash(&tx_bytes);
-
-    let response = HashPinResponse {
-        rx_key: hex::encode(rx_hashed.as_bytes()),
-        tx_key: hex::encode(tx_hashed.as_bytes()),
-    };
-
-    println!("SIDECAR [BLE]: Hashing complete. RX HASH: {}", response.rx_key);
-    Json(response).into_response()
+    Json(HashResponse {
+        hashed_rx: hex::encode(hashed_rx.as_bytes()),
+        hashed_tx: hex::encode(hashed_tx.as_bytes()),
+    }).into_response()
 }
 
 pub async fn connect_wifi() -> impl IntoResponse {
