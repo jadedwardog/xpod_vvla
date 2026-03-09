@@ -2,52 +2,75 @@
   "scan_start": [
     "I am looking for Sarah Connor.",
     "Where we are going, we do not need roads.",
-    "I feel the need, the need for speed."
+    "I feel the need, the need for speed.",
+    "Radar sir. We're picking up a disturbance.",
+    "Sweep the leg."
   ],
   "device_selected": [
     "You are the disease, and I am the cure.",
     "I choose you!",
-    "You are the One."
+    "You are the One.",
+    "We have a winner.",
+    "May the Force be with you."
   ],
   "connect_attempt": [
     "It is alive!",
     "Hold on to your butts...",
-    "Here is looking at you, kid."
+    "Here is looking at you, kid.",
+    "Initiating docking procedure.",
+    "Lock S-foils in attack position."
   ],
   "connect_drop": [
     "We are gonna need a bigger boat.",
     "I have a bad feeling about this.",
-    "It is a trap!"
+    "It is a trap!",
+    "I don't want to go...",
+    "He's dead, Jim."
   ],
   "connect_fail": [
     "Houston, we have a problem.",
     "Game over, man! Game over!",
-    "Failure is not an option."
+    "Failure is not an option.",
+    "I'm sorry, Dave. I'm afraid I can't do that.",
+    "Mission failed. We'll get 'em next time."
   ],
   "disconnect": [
     "I will be back.",
     "Hasta la vista, baby.",
-    "Frankly, my dear, I do not give a damn."
+    "Frankly, my dear, I do not give a damn.",
+    "Beam me up, Scotty.",
+    "Good night, and good luck."
+  ],
+  "pairing": [
+    "Let's do the time warp again.",
+    "Just the two of us.",
+    "We're in.",
+    "Are we best friends now?"
   ],
   "characteristics_found": [
     "Elementary, my dear Watson.",
     "Show me the money!",
-    "I see dead people."
+    "I see dead people.",
+    "The truth is out there.",
+    "There's something out there waiting for us."
   ],
   "notifications_active": [
     "It is working! It is working!",
     "To infinity and beyond!",
-    "She may not look like much, but she has got it where it counts, kid."
+    "She may not look like much, but she has got it where it counts, kid.",
+    "I can hear you now."
   ],
   "msg_received": [
     "What is in the box?!",
     "You talkin' to me?",
-    "Here's Johnny!"
+    "Here's Johnny!",
+    "Message for you, sir!"
   ],
   "handshake_accepted": [
     "You have chosen... wisely.",
     "You complete me.",
-    "I think this is the beginning of a beautiful friendship."
+    "I think this is the beginning of a beautiful friendship.",
+    "Did we just become best friends?"
   ],
   "clad_received": [
     "Show me the money!",
@@ -57,17 +80,20 @@
   "key_received": [
     "I have the codes.",
     "The matrix is everywhere.",
-    "Keep your friends close, but your enemies closer."
+    "Keep your friends close, but your enemies closer.",
+    "It's a secret to everybody."
   ],
   "secret_derived": [
     "I love it when a plan comes together.",
     "Magic Mirror on the wall...",
-    "There is no place like home."
+    "There is no place like home.",
+    "The dark fire will not avail you, flame of Udûn."
   ],
   "send_key": [
     "Say hello to my little friend.",
     "Go ahead, make my day.",
-    "Yippee-ki-yay."
+    "Yippee-ki-yay.",
+    "Dodge this."
   ],
   "nonces_received": [
     "Chewie, we are home.",
@@ -77,7 +103,8 @@
   "pairing_cancelled": [
     "I will be back.",
     "Forget it, Jake, it is Chinatown.",
-    "I am altering the deal. Pray I do not alter it any further."
+    "I am altering the deal. Pray I do not alter it any further.",
+    "Fine, I'll do it myself."
   ],
   "send_version": [
     "Make it so.",
@@ -87,7 +114,9 @@
   "error_general": [
     "I am sorry, Dave. I am afraid I cannot do that.",
     "You cannot pass!",
-    "My precious."
+    "My precious.",
+    "I've made a huge mistake.",
+    "Well, nobody's perfect."
   ],
   "send_single": [
     "One ping only, please.",
@@ -97,6 +126,95 @@
   "send_chunk": [
     "Hold on to your butts...",
     "Fasten your seatbelts. It is going to be a bumpy night.",
-    "Buckle up, Dorothy, because Kansas is going bye-bye."
+    "Buckle up, Dorothy, because Kansas is going bye-bye.",
+    "Punch it, Chewie!"
+  ],
+  "wifi_scanning": [
+    "Looking for signs of life...",
+    "Is there anybody out there?",
+    "I sense a disturbance in the Force.",
+    "Echo base, this is Rogue Two. I found them."
+  ],
+  "wifi_connecting": [
+    "Crossing the streams...",
+    "Hold the line!",
+    "Stay on target...",
+    "Never tell me the odds!"
+  ],
+  "wifi_auth_failed": [
+    "I have no memory of this place.",
+    "You shall not pass!",
+    "Access denied. Ah ah ah, you didn't say the magic word.",
+    "It's an older code, sir, but it doesn't check out."
+  ],
+  "http_request": [
+    "Sending out an SOS.",
+    "Fly, you fools!",
+    "Release the Kraken!",
+    "A wizard is never late, nor is he early."
+  ],
+  "http_ok": [
+    "The eagle has landed.",
+    "Mission accomplished.",
+    "That'll do, pig. That'll do.",
+    "It's a bingo!"
+  ],
+  "http_error": [
+    "It's a trap!",
+    "We're going down, we're going down!",
+    "I find your lack of faith disturbing.",
+    "This is fine."
+  ],
+  "rust_boot": [
+    "I am Iron Man.",
+    "Some motherf***ers are always trying to ice-skate uphill.",
+    "Are you not entertained?",
+    "Gentlemen, you can't fight in here! This is the War Room."
+  ],
+  "rust_panic": [
+    "Mr. Stark, I don't feel so good...",
+    "System failure.",
+    "Danger, Will Robinson! Danger!",
+    "I'm melting! Melting! Oh, what a world!"
+  ],
+  "rust_thread_spawn": [
+    "I am Legion, for we are many.",
+    "Double your pleasure, double your fun.",
+    "Hello there.",
+    "This is getting out of hand. Now there are two of them!"
+  ],
+  "rust_ipc": [
+    "Talk to me, Goose.",
+    "Do you hear the people sing?",
+    "ET phone home."
+  ],
+  "provisioning": [
+    "We can rebuild him. We have the technology.",
+    "I need your clothes, your boots, and your motorcycle.",
+    "I'm upgrading my systems.",
+    "More power, Igor!"
+  ],
+  "provisioning_success": [
+    "I know kung fu.",
+    "Witness me!",
+    "I am complete!",
+    "Now I am become Death, the destroyer of worlds."
+  ],
+  "ota_start": [
+    "I feel a change coming on.",
+    "I'm going through changes.",
+    "To boldly go where no man has gone before."
+  ],
+  "ota_complete": [
+    "I'm a real boy now!",
+    "Power level is over 9000!",
+    "This isn't even my final form.",
+    "I can see clearly now the rain is gone."
+  ],
+  "success": [
+    "Great success!",
+    "Very nice!",
+    "Flawless victory.",
+    "I'm king of the world!"
   ]
 }

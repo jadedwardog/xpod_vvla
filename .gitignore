@@ -6,7 +6,9 @@ Cargo.lock
 #Environment and Secrets
 
 .env
+*.txt
 *.pem
+*.key
 
 #IDEs
 

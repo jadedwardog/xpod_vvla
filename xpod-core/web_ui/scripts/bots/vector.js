@@ -1,9 +1,13 @@
 class VectorSetup {
     constructor() {
-        console.log("[xpod] VectorSetup Module Loaded - Handshake Revision (v4)");
+        console.log("[xpod] VectorSetup Module Loaded - Reverted BLE Framing + Preserved CLAD v2 Fixes");
         this.VECTOR_WRITE_UUID = '7d2a4bda-d29b-4152-b725-2491478c5cd7';
         this.VECTOR_NOTIFY_UUID = '30619f2d-0f54-41bd-a65a-7588d8c85b45';
         this.VECTOR_SERVICE_UUID = '0000fee3-0000-1000-8000-00805f9b34fb';
+        
+        this.boundHandleIncomingPacket = this.handleIncomingPacket.bind(this);
+        this.boundHandleDisconnect = this.handleDisconnect.bind(this);
+
         this.multipartBuffer = new Uint8Array(0);
         this.isReceivingEncrypted = false;
         this.isSecureChannel = false;
@@ -21,12 +25,34 @@ class VectorSetup {
         this.networks = [];
         this.botInfo = null;
         this.lastUsedWifi = null;
+        this.botIp = null;
+        this.rtsVersion = 5; 
     }
 
     bufToHex(buf) {
         return Array.from(new Uint8Array(buf))
             .map(b => b.toString(16).padStart(2, '0'))
             .join(' ');
+    }
+
+    async updateStatus(text, quoteRef = null) {
+        const statusText = document.getElementById('vector-setup-status');
+        if (!statusText) return;
+        
+        let finalOutput = `> ${text}`;
+        
+        if (quoteRef && window.quoteManager) {
+            try {
+                const quote = await window.quoteManager.getRandomQuote(quoteRef);
+                if (quote) {
+                    finalOutput += `<br><span style="color: rgba(0, 255, 0, 0.6); font-style: italic; font-size: 0.85em; margin-top: 5px; display: block;">"${quote}"</span>`;
+                }
+            } catch (e) {
+                console.warn("QuoteManager error:", e);
+            }
+        }
+        
+        statusText.innerHTML = finalOutput;
     }
 
     async renderUI(container) {
@@ -83,8 +109,17 @@ class VectorSetup {
                     </div>
                     <button id="ota-restart-btn" class="neon-btn" style="display: none; width: 100%; margin-top: 10px; border-color: #ff003c; color: #ff003c;">RESTART VECTOR</button>
                 </div>
+                
+                <div id="ssh-provision-section" style="border-top: 1px solid rgba(0,255,0,0.3); padding-top: 10px; margin-bottom: 15px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                        <span style="font-size: 0.8rem; color: rgba(0,255,0,0.8);">LAN IP ADDRESS:</span>
+                        <span id="status-lan-ip" style="font-size: 0.8rem; color: #fff; font-family: monospace;">AWAITING WI-FI...</span>
+                    </div>
+                    <button id="ssh-provision-btn" class="neon-btn" style="width: 100%; border-color: #0088ff; color: #0088ff;" disabled>PROVISION BOT (SSH)</button>
+                </div>
+
                 <div style="border-top: 1px solid rgba(0,255,0,0.3); padding-top: 10px;">
-                    <button id="cloud-auth-btn" class="neon-btn" style="width: 100%;">AUTHORISE CLOUD SESSION</button>
+                    <button id="cloud-auth-btn" class="neon-btn" style="width: 100%; opacity: 0.5;" disabled>AUTHORISE CLOUD SESSION</button>
                 </div>
             </div>
 
@@ -93,7 +128,7 @@ class VectorSetup {
                 <div style="font-weight: bold; margin-bottom: 5px; color: #fff; text-shadow: 0 0 5px #fff;">DIAGNOSTIC FEED</div>
                 <div id="vector-diagnostic-feed" style="height: 250px; overflow-y: auto;"></div>
             </div>
-            <button class="neon-btn" style="margin-top: 20px; border-color: #ff003c; color: #ff003c;" onclick="document.getElementById('dynamic-setup-container').style.display='none'; document.getElementById('eyes-display').style.opacity='1'; document.querySelector('.bottom-status .title').innerText='DASHBOARD';">ABORT</button>
+            <button id="vector-abort-btn" class="neon-btn" style="margin-top: 20px; border-color: #ff003c; color: #ff003c;">ABORT</button>
         `;
         const diagFeed = document.getElementById('vector-diagnostic-feed');
         if (window.appLogger) {
@@ -106,19 +141,61 @@ class VectorSetup {
         document.getElementById('wifi-connect-btn').addEventListener('click', () => this.connectToWifi());
         document.getElementById('ota-update-btn').addEventListener('click', () => this.triggerOtaUpdate());
         document.getElementById('ota-restart-btn').addEventListener('click', () => this.rebootRobot());
+        document.getElementById('ssh-provision-btn').addEventListener('click', () => this.provisionBotSsh());
         document.getElementById('cloud-auth-btn').addEventListener('click', () => this.cloudAuthorize());
+        document.getElementById('vector-abort-btn').addEventListener('click', () => this.abortSetup());
+    }
+
+    async handleDisconnect() {
+        if (window.appLogger) window.appLogger.log('CRITICAL', 'FROM ROBOT', 'Robot severed GATT connection.');
+        await this.updateStatus("OFFLINE. CONNECTION LOST.", "connect_drop");
+        
+        this.isSecureChannel = false;
+        this.isReceivingEncrypted = false;
+        
+        if (this.notifyChar) {
+            try {
+                this.notifyChar.removeEventListener('characteristicvaluechanged', this.boundHandleIncomingPacket);
+            } catch(e) {}
+        }
+    }
+
+    async abortSetup() {
+        if (window.appLogger) window.appLogger.log('WARN', 'LOCAL', 'Setup aborted by user.');
+        await this.updateStatus("SETUP CANCELLED.", "pairing_cancelled");
+        
+        try {
+            if (this.writeChar && this.isSecureChannel) {
+                if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'Sending Force Disconnect to robot to reset switchboard state...');
+                await this.sendEncrypted(new Uint8Array([0x04, this.rtsVersion, 0x11]));
+            }
+        } catch(e) {}
+
+        if (this.device && this.device.gatt.connected) {
+            this.device.gatt.disconnect();
+        }
+        setTimeout(() => {
+            document.getElementById('dynamic-setup-container').style.display = 'none';
+            document.getElementById('eyes-display').style.opacity = '1';
+            const dashTitle = document.querySelector('.bottom-status .title');
+            if (dashTitle) dashTitle.innerText = 'DASHBOARD';
+        }, 2000);
     }
 
     async sendFramedPayload(writeChar, payload) {
         const totalLen = payload.length;
+        if (window.appLogger) window.appLogger.log('DEBUG', 'BLE_TX_PAYLOAD', `Payload to frame (${totalLen} bytes): ${this.bufToHex(payload)}`);
+        
         if (totalLen <= 19) {
             const header = 0xC0 | totalLen;
             const chunk = new Uint8Array(1 + totalLen);
             chunk[0] = header;
             chunk.set(payload, 1);
+            if (window.appLogger) window.appLogger.log('DEBUG', 'BLE_TX_CHUNK', `Writing single chunk: ${this.bufToHex(chunk)}`);
             await writeChar.writeValueWithoutResponse(chunk);
             return;
         }
+        
         let offset = 0;
         let isFirst = true;
         while (offset < totalLen) {
@@ -129,11 +206,15 @@ class VectorSetup {
             if (isFirst) multipart = 2;
             else if (isLast) multipart = 1;
             else multipart = 0;
+            
             const header = (multipart << 6) | chunkLen;
             const chunk = new Uint8Array(1 + chunkLen);
             chunk[0] = header;
             chunk.set(payload.subarray(offset, offset + chunkLen), 1);
+            
+            if (window.appLogger) window.appLogger.log('DEBUG', 'BLE_TX_CHUNK', `Writing multipart chunk: ${this.bufToHex(chunk)}`);
             await writeChar.writeValueWithoutResponse(chunk);
+            
             offset += chunkLen;
             isFirst = false;
             if (!isLast) await new Promise(r => setTimeout(r, 100));
@@ -142,6 +223,7 @@ class VectorSetup {
 
     async sendEncrypted(payload) {
         try {
+            if (window.appLogger) window.appLogger.log('DEBUG', 'BLE_TX_PLAINTEXT', `Encrypting payload: ${this.bufToHex(payload)}`);
             const sodium = window.sodium;
             const ciphertext = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
                 payload,
@@ -153,47 +235,51 @@ class VectorSetup {
             sodium.increment(this.toRobotNonce);
             await this.sendFramedPayload(this.writeChar, ciphertext);
         } catch (error) {
-            window.appLogger.log('ERROR', 'LOCAL', `Encryption failed: ${error.message}`);
+            if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', `Encryption failed: ${error.message}`);
         }
     }
 
     async requestStatus() {
-        window.appLogger.log('INFO', 'LOCAL', 'Requesting robot status...');
-        await this.sendEncrypted(new Uint8Array([0x04, 0x05, 0x0A]));
+        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'Requesting robot status...');
+        await this.sendEncrypted(new Uint8Array([0x04, this.rtsVersion, 0x0A]));
+    }
+
+    async requestWifiIp() {
+        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'Requesting robot LAN IP address...');
+        await this.sendEncrypted(new Uint8Array([0x04, this.rtsVersion, 0x08]));
     }
 
     async startWifiScan() {
-        window.appLogger.log('INFO', 'LOCAL', 'Triggering Wi-Fi scan...');
-        await this.sendEncrypted(new Uint8Array([0x04, 0x05, 0x0C]));
+        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'Triggering Wi-Fi scan...');
+        await this.sendEncrypted(new Uint8Array([0x04, this.rtsVersion, 0x0C]));
     }
 
     async rebootRobot() {
-        window.appLogger.log('INFO', 'LOCAL', 'Sending Force Restart command (Tag 0x11)...');
-        await this.sendEncrypted(new Uint8Array([0x04, 0x05, 0x11]));
+        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'Sending Force Restart command (Tag 0x11)...');
+        await this.sendEncrypted(new Uint8Array([0x04, this.rtsVersion, 0x11]));
     }
 
     async connectToWifi(targetNetwork = null, targetPassword = null) {
         const ssid = targetNetwork || document.getElementById('wifi-network-select').value;
         const password = targetPassword || document.getElementById('wifi-password-input').value;
-        const statusText = document.getElementById('vector-setup-status');
         
         const net = this.networks.find(n => n.ssid === ssid);
-        if (!net) {
-            window.appLogger.log('ERROR', 'LOCAL', `Target network metadata (${ssid}) not found.`);
+        if (!net && !targetNetwork) {
+            if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', `Target network metadata (${ssid}) not found.`);
             return;
         }
 
-        window.appLogger.log('INFO', 'LOCAL', `Initiating connection to ${ssid}...`);
-        if (statusText) statusText.innerText = "> CONNECTING TO WI-FI...";
+        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Initiating connection to ${ssid}...`);
+        await this.updateStatus("CONNECTING TO WI-FI...", "wifi_connecting");
 
         this.lastUsedWifi = { ssid, password };
 
-        const ssidHexBytes = new TextEncoder().encode(net.ssidHex);
+        const ssidHexBytes = new TextEncoder().encode(net ? net.ssidHex : Array.from(ssid).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join(''));
         const passBytes = new TextEncoder().encode(password);
 
         const payload = new Uint8Array(3 + 1 + ssidHexBytes.length + 1 + passBytes.length + 1 + 1 + 1);
         payload[0] = 0x04;
-        payload[1] = 0x05;
+        payload[1] = this.rtsVersion;
         payload[2] = 0x06;
         
         let pos = 3;
@@ -206,8 +292,8 @@ class VectorSetup {
         pos += passBytes.length;
         
         payload[pos++] = 15; 
-        payload[pos++] = net.authType;
-        payload[pos++] = net.hidden ? 1 : 0;
+        payload[pos++] = net ? net.authType : 0x00;
+        payload[pos++] = net ? (net.hidden ? 1 : 0) : 0;
 
         await this.sendEncrypted(payload);
     }
@@ -215,15 +301,15 @@ class VectorSetup {
     async triggerOtaUpdate() {
         const url = document.getElementById('ota-url-input').value;
         if (!url) {
-            window.appLogger.log('WARN', 'LOCAL', 'OTA URL cannot be empty.');
+            if (window.appLogger) window.appLogger.log('WARN', 'LOCAL', 'OTA URL cannot be empty.');
             return;
         }
-        window.appLogger.log('INFO', 'LOCAL', `Requesting OTA update from: ${url}`);
+        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Requesting OTA update from: ${url}`);
         
         const urlBytes = new TextEncoder().encode(url);
         const payload = new Uint8Array(3 + 1 + urlBytes.length);
         payload[0] = 0x04;
-        payload[1] = 0x05;
+        payload[1] = this.rtsVersion;
         payload[2] = 0x0E;
         payload[3] = urlBytes.length;
         payload.set(urlBytes, 4);
@@ -234,18 +320,65 @@ class VectorSetup {
         document.getElementById('ota-restart-btn').style.display = 'none';
     }
 
-    async cloudAuthorize() {
-        const statusText = document.getElementById('vector-setup-status');
+    async provisionBotSsh() {
+        if (!this.botIp || !this.botInfo || !this.botInfo.esn) {
+            if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', 'Cannot provision: Missing IP or ESN. Check Wi-Fi connection.');
+            return;
+        }
+
+        const btn = document.getElementById('ssh-provision-btn');
+        btn.disabled = true;
+        btn.innerText = "PROVISIONING VIA SSH...";
+        await this.updateStatus("INJECTING DNS AND CERTS VIA SSH...", "provisioning");
         
-        // Safety check: Is the robot connected to Wi-Fi?
+        try {
+            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Requesting xpod-core to SSH provision bot at ${this.botIp}`);
+            const response = await fetch('/api/core/provision_bot', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    ip: this.botIp, 
+                    esn: this.botInfo.esn,
+                    server_ip: window.location.hostname
+                })
+            });
+            
+            if (response.ok) {
+                if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'SSH Provisioning successful.');
+                await this.updateStatus("PROVISIONING COMPLETE. READY FOR CLOUD AUTH.", "provisioning_success");
+                
+                btn.innerText = "PROVISIONED [OK]";
+                btn.style.color = "#00ff00";
+                btn.style.borderColor = "#00ff00";
+                btn.style.opacity = "0.4";
+                btn.style.cursor = "default";
+                btn.disabled = true;
+                
+                const authBtn = document.getElementById('cloud-auth-btn');
+                authBtn.disabled = false;
+                authBtn.style.opacity = '1';
+            } else {
+                const errText = await response.text();
+                throw new Error(errText);
+            }
+        } catch (e) {
+            if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', `SSH Provisioning failed: ${e.message}`);
+            await this.updateStatus(`PROVISIONING FAILED: ${e.message}`, "error_general");
+            btn.disabled = false;
+            btn.innerText = "RETRY PROVISION BOT (SSH)";
+            btn.style.color = "#ff003c";
+            btn.style.borderColor = "#ff003c";
+        }
+    }
+
+    async cloudAuthorize() {
         if (!this.botInfo || (this.botInfo.wifiState !== 1)) {
-            window.appLogger.log('WARN', 'LOCAL', 'Robot is offline. Attempting Wi-Fi reconnection before authorisation.');
+            if (window.appLogger) window.appLogger.log('WARN', 'LOCAL', 'Robot is offline. Attempting Wi-Fi reconnection before authorisation.');
             if (this.lastUsedWifi) {
                 await this.connectToWifi(this.lastUsedWifi.ssid, this.lastUsedWifi.password);
-                // Authorisation will be retried automatically upon successful connection response
                 return;
             } else {
-                if (statusText) statusText.innerText = "> ERR: ROBOT OFFLINE. CONNECT WI-FI FIRST.";
+                await this.updateStatus("ERR: ROBOT OFFLINE. CONNECT WI-FI FIRST.", "error_general");
                 return;
             }
         }
@@ -254,44 +387,58 @@ class VectorSetup {
         const clientName = "Web-Setup";
         const appId = "com.anki.vector";
         
+        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Preparing Cloud Authorisation Request [V5]`);
+        if (window.appLogger) window.appLogger.log('DEBUG', 'LOCAL', `Auth Params -> Token: ${sessionToken}, Client: ${clientName}, AppId: ${appId}`);
+
         const encoder = new TextEncoder();
         const tokenBytes = encoder.encode(sessionToken);
         const nameBytes = encoder.encode(clientName);
         const appBytes = encoder.encode(appId);
 
-        const totalLength = 3 + 2 + tokenBytes.length + 1 + nameBytes.length + 1 + appBytes.length;
+        const totalLength = 3 + 1 + tokenBytes.length + 1 + nameBytes.length + 1 + appBytes.length;
         const payload = new Uint8Array(totalLength);
 
         let offset = 0;
-        payload.set([0x04, 0x05, 0x1D], offset);
+        payload.set([0x04, this.rtsVersion, 0x1D], offset);
         offset += 3;
 
-        // sessionToken (uint16 Little-Endian length prefix)
-        payload[offset] = tokenBytes.length & 0xFF;
-        payload[offset + 1] = (tokenBytes.length >> 8) & 0xFF;
-        offset += 2;
+        payload[offset] = tokenBytes.length;
+        offset += 1;
         payload.set(tokenBytes, offset);
         offset += tokenBytes.length;
 
-        // clientName (uint8 length prefix)
         payload[offset] = nameBytes.length;
         offset += 1;
         payload.set(nameBytes, offset);
         offset += nameBytes.length;
 
-        // appId (uint8 length prefix)
         payload[offset] = appBytes.length;
         offset += 1;
         payload.set(appBytes, offset);
 
-        window.appLogger.log('INFO', 'LOCAL', `Submitting Cloud Authorisation Request [V5] with token: ${sessionToken}`);
+        if (window.appLogger) window.appLogger.log('DEBUG', 'LOCAL', `Cloud Auth Payload Packed (${totalLength} bytes): ${this.bufToHex(payload)}`);
+        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Submitting Cloud Authorisation Request to Robot with token: ${sessionToken}`);
+        
+        await this.updateStatus("AUTHORISING CLOUD SESSION WITH ROBOT...", "provisioning");
+
+        try {
+            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Instructing sidecar to tail SSH logs for ${this.botIp}...`);
+            await fetch('/api/vector/diagnostics/tail', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ip: this.botIp })
+            });
+        } catch (e) {
+            if (window.appLogger) window.appLogger.log('WARN', 'LOCAL', `Could not start SSH tail: ${e.message}`);
+        }
+
         await this.sendEncrypted(payload);
     }
 
     parseWifiScan(data) {
         const status = data[0];
         const count = data[1];
-        window.appLogger.log('INFO', 'LOCAL', `Scan Result - Status: ${status}, Networks found: ${count}`);
+        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Scan Result - Status: ${status}, Networks found: ${count}`);
         
         const select = document.getElementById('wifi-network-select');
         const wifiSection = document.getElementById('wifi-connection-section');
@@ -303,7 +450,6 @@ class VectorSetup {
 
         for (let i = 0; i < count; i++) {
             if (offset + 3 > data.length) break;
-            
             const authType = data[offset];
             const signal = data[offset + 1];
             const ssidLen = data[offset + 2];
@@ -327,15 +473,14 @@ class VectorSetup {
             opt.text = `${ssid} (${signal}%)`;
             if (select) select.appendChild(opt);
 
-            window.appLogger.log('INFO', 'LOCAL', `Network ${i + 1}: ${ssid} [Signal: ${signal}, Auth: ${authType}, Hidden: ${hidden}, Provisioned: ${provisioned}]`);
-            
+            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Network ${i + 1}: ${ssid} [Signal: ${signal}, Auth: ${authType}, Hidden: ${hidden}, Provisioned: ${provisioned}]`);
             offset += 5 + ssidLen;
         }
 
         if (wifiSection) wifiSection.style.display = 'block';
     }
 
-    parseStatusResponse(data) {
+    async parseStatusResponse(data) {
         let offset = 0;
         const decoder = new TextDecoder();
 
@@ -378,18 +523,19 @@ class VectorSetup {
         document.getElementById('status-auth').style.color = isCloudAuthed ? "#00ff00" : "#ff003c";
         document.getElementById('status-owner').innerText = hasOwner ? "YES" : "NO";
 
-        const statusText = document.getElementById('vector-setup-status');
-        if (statusText) {
-            statusText.innerText = `> STATUS LOADED: ${esn}`;
-        }
+        await this.updateStatus(`STATUS LOADED: ${esn}`, "msg_received");
 
-        window.appLogger.log('INFO', 'LOCAL', `Bot Status Parsed -> ESN: ${esn}, OS: ${osVersion}, WiFi: ${wifiState === 1 ? 'ONLINE' : 'OFFLINE'}`);
+        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Bot Status Parsed -> ESN: ${esn}, OS: ${osVersion}, WiFi: ${wifiState === 1 ? 'ONLINE' : 'OFFLINE'}`);
         
         const nextSteps = document.getElementById('vector-next-steps');
         if (nextSteps) nextSteps.style.display = 'block';
+
+        if (wifiState === 1 && !this.botIp) {
+            this.requestWifiIp();
+        }
     }
 
-    handleOtaProgress(data) {
+    async handleOtaProgress(data) {
         const statusCode = data[0];
         const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
         
@@ -398,25 +544,24 @@ class VectorSetup {
 
         const progressBar = document.getElementById('ota-progress-bar');
         const progressText = document.getElementById('ota-progress-text');
-        const statusText = document.getElementById('vector-setup-status');
         const restartBtn = document.getElementById('ota-restart-btn');
 
-        if (statusCode === 0x02) { // IN_PROGRESS
+        if (statusCode === 0x02) {
             const percentage = total > 0 ? Math.min(100, Math.floor((current / total) * 100)) : 0;
             if (progressBar) progressBar.style.width = `${percentage}%`;
             if (progressText) progressText.innerText = `${percentage}% (Processing)`;
-            if (statusText && current === 0) statusText.innerText = "> OTA: TRANSITIONING TO FLASH PHASE...";
-        } else if (statusCode === 0x03) { // COMPLETED
+            if (current === 0) await this.updateStatus("OTA: TRANSITIONING TO FLASH PHASE...", "ota_start");
+        } else if (statusCode === 0x03) {
             if (progressBar) progressBar.style.width = `100%`;
             if (progressText) progressText.innerText = `OTA COMPLETE`;
-            if (statusText) statusText.innerText = "> OTA INSTALLATION SUCCESSFUL.";
+            await this.updateStatus("OTA INSTALLATION SUCCESSFUL.", "ota_complete");
             if (restartBtn) restartBtn.style.display = 'block';
-        } else if (statusCode === 0x04) { // REBOOTING
-            if (statusText) statusText.innerText = "> ROBOT REBOOTING. CONNECTION WILL DROP.";
-            window.appLogger.log('WARN', 'LOCAL', 'Robot issued reboot command after OTA.');
-        } else if (statusCode === 0x05) { // ERROR
-            if (statusText) statusText.innerText = "> OTA FAILED. CHECK LOGS.";
-            window.appLogger.log('ERROR', 'LOCAL', 'OTA error status received from robot.');
+        } else if (statusCode === 0x04) {
+            await this.updateStatus("ROBOT REBOOTING. CONNECTION WILL DROP.", "disconnect");
+            if (window.appLogger) window.appLogger.log('WARN', 'LOCAL', 'Robot issued reboot command after OTA.');
+        } else if (statusCode === 0x05) {
+            await this.updateStatus("OTA FAILED. CHECK LOGS.", "error_general");
+            if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', 'OTA error status received from robot.');
         }
     }
 
@@ -424,19 +569,15 @@ class VectorSetup {
         try {
             const sodium = window.sodium;
             const plaintext = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
-                null,
-                encryptedPayload,
-                null,
-                this.toDeviceNonce,
-                this.rxKey
+                null, encryptedPayload, null, this.toDeviceNonce, this.rxKey
             );
             this.pendingChallenge = null;
             sodium.increment(this.toDeviceNonce);
-            window.appLogger.log('INFO', 'FROM ROBOT (SECURE)', `Decrypted plaintext: ${this.bufToHex(plaintext)}`);
+            
+            if (window.appLogger) window.appLogger.log('INFO', 'FROM ROBOT (SECURE)', `Decrypted plaintext: ${this.bufToHex(plaintext)}`);
 
             if (plaintext.length >= 3 && plaintext[0] === 0x04) {
                 const cladTag = plaintext[2];
-                const statusText = document.getElementById('vector-setup-status');
 
                 if (cladTag === 0x04) {
                     const view = new DataView(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength);
@@ -445,11 +586,11 @@ class VectorSetup {
                     const responseView = new DataView(responsePlaintext.buffer, responsePlaintext.byteOffset, responsePlaintext.byteLength);
                     responseView.setUint32(3, challengeNum + 1, true);
                     await this.sendEncrypted(responsePlaintext);
-                    if (statusText) statusText.innerText = "> CHALLENGE ANSWERED. AWAITING CONFIRMATION...";
+                    await this.updateStatus("CHALLENGE ANSWERED. AWAITING CONFIRMATION...", "send_key");
                 } else if (cladTag === 0x05) {
-                    if (statusText) statusText.innerText = "> SECURE PAIRING COMPLETE!";
+                    await this.updateStatus("SECURE PAIRING COMPLETE!", "handshake_accepted");
                     document.getElementById('vector-control-panel').style.display = 'block';
-                    await this.sendEncrypted(new Uint8Array([0x04, 0x05, 0x12, 0x05]));
+                    await this.sendEncrypted(new Uint8Array([0x04, this.rtsVersion, 0x12, 0x05]));
                     this.requestStatus(); 
                 } else if (cladTag === 0x07) {
                     const ssidLen = plaintext[3];
@@ -457,38 +598,95 @@ class VectorSetup {
                     let resultMsg = "FAILURE";
                     if (connectResult === 0x00) resultMsg = "SUCCESS";
                     else if (connectResult === 0x02) resultMsg = "INVALID PASSWORD";
-                    window.appLogger.log('INFO', 'FROM ROBOT (SECURE)', `Wi-Fi connection result: ${resultMsg}`);
-                    if (statusText) statusText.innerText = `> WI-FI: ${resultMsg}`;
+                    
+                    if (window.appLogger) window.appLogger.log('INFO', 'FROM ROBOT (SECURE)', `Wi-Fi connection result: ${resultMsg}`);
+                    await this.updateStatus(`WI-FI: ${resultMsg}`, connectResult === 0x00 ? "success" : "wifi_auth_failed");
+                    
                     if (connectResult === 0x00) {
                         this.requestStatus();
-                        // If we were reconnecting specifically for cloud auth, trigger it now
-                        if (this.lastUsedWifi) setTimeout(() => this.cloudAuthorize(), 2000);
+                        setTimeout(() => this.requestWifiIp(), 2000);
+                    }
+                } else if (cladTag === 0x09) {
+                    const hasIpv4 = plaintext[3];
+                    if (hasIpv4 === 0x01) {
+                        this.botIp = `${plaintext[5]}.${plaintext[6]}.${plaintext[7]}.${plaintext[8]}`;
+                        if (window.appLogger) window.appLogger.log('INFO', 'FROM ROBOT (SECURE)', `Acquired IP Address: ${this.botIp}`);
+                        
+                        const ipSpan = document.getElementById('status-lan-ip');
+                        if (ipSpan) ipSpan.innerText = this.botIp;
+                        
+                        const provBtn = document.getElementById('ssh-provision-btn');
+                        if (provBtn) {
+                            provBtn.disabled = false;
+                            provBtn.innerText = "PROVISION BOT (SSH)";
+                        }
+                        await this.updateStatus("IP ACQUIRED. READY FOR SSH PROVISIONING.", "characteristics_found");
                     }
                 } else if (cladTag === 0x0B) {
-                    this.parseStatusResponse(plaintext.slice(3));
+                    await this.parseStatusResponse(plaintext.slice(3));
                 } else if (cladTag === 0x0D) {
                     this.parseWifiScan(plaintext.slice(3));
                 } else if (cladTag === 0x0F) {
-                    this.handleOtaProgress(plaintext.slice(3));
-                } else if (cladTag === 0x1E) { // CloudSessionResponse
+                    await this.handleOtaProgress(plaintext.slice(3));
+                } else if (cladTag === 0x1E) {
                     const success = plaintext[3] === 0x01;
                     const statusCode = plaintext[4];
-                    const view = new DataView(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength);
-                    const guidLen = view.getUint16(5, true);
-                    const guid = new TextDecoder().decode(plaintext.slice(7, 7 + guidLen));
+                    const guidLen = plaintext[5];
+                    const guid = new TextDecoder().decode(plaintext.slice(6, 6 + guidLen));
                     
-                    window.appLogger.log('INFO', 'FROM ROBOT (SECURE)', `Cloud Auth Result: ${success ? 'SUCCESS' : 'FAILED'} (Status: ${statusCode})`);
+                    if (window.appLogger) window.appLogger.log('INFO', 'FROM ROBOT (SECURE)', `Cloud Auth Result Received! Success: ${success}, Status Code: ${statusCode}`);
+                    if (window.appLogger) window.appLogger.log('DEBUG', 'FROM ROBOT (SECURE)', `Extracted Token GUID: '${guid}' (Length: ${guidLen})`);
+                    
                     if (success) {
-                        window.appLogger.log('INFO', 'LOCAL', `Authorised GUID: ${guid}`);
-                        if (statusText) statusText.innerText = "> ACCOUNT PAIRED SUCCESSFULLY!";
-                        this.requestStatus(); // Refresh auth UI
+                        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Robot Accepted Cloud Session. Authorised GUID: ${guid}`);
+                        await this.updateStatus("ROBOT PAIRED! REGISTERING WITH SIDECAR...", "provisioning");
+                        this.requestStatus();
+                        
+                        try {
+                            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Invoking Sidecar API: POST /api/vector/sidecar/connect`);
+                            if (window.appLogger) window.appLogger.log('DEBUG', 'LOCAL', `Registration Payload -> ESN: ${this.botInfo.esn}, IP: ${this.botIp}, GUID: ${guid}`);
+                            
+                            const regResponse = await fetch('/api/vector/sidecar/connect', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ esn: this.botInfo.esn, ip: this.botIp, client_token_guid: guid })
+                            });
+
+                            if (regResponse.ok) {
+                                if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Sidecar API Registration Successful.`);
+                                await this.updateStatus("ACCOUNT PAIRED & REGISTERED! READY FOR SIDECAR.", "provisioning_success");
+                                
+                                const authBtn = document.getElementById('cloud-auth-btn');
+                                if(authBtn) {
+                                    authBtn.innerText = "AUTHENTICATED [OK]";
+                                    authBtn.style.color = "#00ff00";
+                                    authBtn.style.borderColor = "#00ff00";
+                                    authBtn.style.opacity = "0.4";
+                                    authBtn.disabled = true;
+                                }
+                            } else {
+                                const errText = await regResponse.text();
+                                if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', `Sidecar API Registration Failed. HTTP ${regResponse.status}: ${errText}`);
+                                throw new Error(`HTTP ${regResponse.status}`);
+                            }
+                        } catch (apiError) {
+                            if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', `Sidecar API Exception during registration: ${apiError.message}`);
+                            await this.updateStatus(`API REGISTRATION FAILED: ${apiError.message}`, "error_general");
+                        }
                     } else {
-                        if (statusText) statusText.innerText = `> CLOUD AUTH FAILED (CODE: ${statusCode})`;
+                        const statusMap = {
+                            0: "UnknownError", 1: "ConnectionError", 2: "WrongAccount",
+                            3: "InvalidSessionToken", 4: "AuthorizedAsPrimary",
+                            5: "AuthorizedAsSecondary", 6: "Reauthorized"
+                        };
+                        const statusStr = statusMap[statusCode] || "UNRECOGNISED_CODE";
+                        if (window.appLogger) window.appLogger.log('ERROR', 'FROM ROBOT (SECURE)', `Robot Rejected Cloud Session: ${statusStr} (Code ${statusCode})`);
+                        await this.updateStatus(`CLOUD AUTH FAILED: ${statusStr} (${statusCode})`, "error_general");
                     }
                 }
             }
         } catch (error) {
-            window.appLogger.log('ERROR', 'LOCAL', `Failed to decrypt secure payload: ${error.message}`);
+            if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', `Failed to decrypt secure payload: ${error.message}`);
             this.isSecureChannel = false;
             this.isReceivingEncrypted = false;
             this.nonceAckSent = false;
@@ -498,22 +696,24 @@ class VectorSetup {
 
     async processPayload(payload, isEncryptedHeaderFlag) {
         const isActuallyEncrypted = (isEncryptedHeaderFlag || this.isSecureChannel) && (payload.length >= 16);
+        if (window.appLogger) window.appLogger.log('DEBUG', 'BLE_RX_ASSEMBLED', `Assembled payload (HeaderFlag: ${isEncryptedHeaderFlag}, SecureChannel: ${this.isSecureChannel}, TreatedAsEncrypted: ${isActuallyEncrypted}): ${this.bufToHex(payload)}`);
+        
         if (isActuallyEncrypted) {
             await this.processSecurePayload(payload);
             return;
         }
+        
         const setupMsgType = payload[0];
         const dataPayload = payload.slice(1);
+        
         if (setupMsgType === 0x01 && dataPayload.length === 4) {
             const version = new DataView(dataPayload.buffer, dataPayload.byteOffset, dataPayload.byteLength).getUint32(0, true);
-            if (version >= 4) {
-                const ackPayload = new Uint8Array(5);
-                ackPayload[0] = 0x01;
-                ackPayload.set(dataPayload, 1);
-                await this.sendFramedPayload(this.writeChar, ackPayload);
-            }
+            this.rtsVersion = version; 
+            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Robot acknowledged RTS protocol version: v${version}. Updating internal tracking.`);
+            await this.updateStatus(`PROTOCOL VERSION NEGOTIATED (v${version}).`, "send_version");
             return;
         }
+        
         if (setupMsgType === 0x04 && dataPayload.length >= 2) {
             const version = dataPayload[0];
             const cladTag = dataPayload[1];
@@ -531,8 +731,7 @@ class VectorSetup {
             } else if (cladTag === 0x03 && cladData.length >= 48) {
                 this.toRobotNonce = cladData.slice(0, 24);
                 this.toDeviceNonce = cladData.slice(24, 48);
-                const statusText = document.getElementById('vector-setup-status');
-                if (statusText) statusText.innerText = "> SUCCESS! CHECK VECTOR SCREEN FOR PIN.";
+                await this.updateStatus("SUCCESS! CHECK VECTOR SCREEN FOR PIN.", "key_received");
                 document.getElementById('pin-entry-section').style.display = 'block';
             }
         }
@@ -540,7 +739,6 @@ class VectorSetup {
 
     async submitPin() {
         const cleanPin = document.getElementById('vector-pin-input').value.replace(/\D/g, '');
-        const statusText = document.getElementById('vector-setup-status');
         if (cleanPin.length !== 6) return;
         document.getElementById('pin-entry-section').style.display = 'none';
         try {
@@ -568,28 +766,36 @@ class VectorSetup {
             this.rxKey = sodium.from_hex(hashData.hashedRx);
             this.txKey = sodium.from_hex(hashData.hashedTx);
             if (!this.nonceAckSent) {
-                await this.sendFramedPayload(this.writeChar, new Uint8Array([0x04, 0x05, 0x12, 0x03]));
+                await this.sendFramedPayload(this.writeChar, new Uint8Array([0x04, this.rtsVersion, 0x12, 0x03]));
                 this.nonceAckSent = true;
                 this.isSecureChannel = true;
-                if (statusText) statusText.innerText = "> KEYS DERIVED. AWAITING ENCRYPTED CHALLENGE...";
+                await this.updateStatus("KEYS DERIVED. AWAITING ENCRYPTED CHALLENGE...", "secret_derived");
             }
         } catch (error) {
-            window.appLogger.log('ERROR', 'LOCAL', `Server crypto failure: ${error.message}`);
+            if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', `Server crypto failure: ${error.message}`);
+            await this.updateStatus(`CRYPTO FAILURE: ${error.message}`, "error_general");
         }
     }
 
     async handleIncomingPacket(event) {
-        const data = new Uint8Array(event.target.value.buffer);
+        const dataView = event.target.value;
+        const data = new Uint8Array(dataView.buffer, dataView.byteOffset, dataView.byteLength);
+        
         if (data.length === 0) return;
+        
+        if (window.appLogger) window.appLogger.log('DEBUG', 'BLE_RX_CHUNK', `Raw incoming chunk: ${this.bufToHex(data)}`);
+        
         const header = data[0];
         const multipartState = header >> 6;
         const isEncryptedHeader = (header & 0x20) !== 0;
         const payloadSize = header & 0x1F;
         const chunk = data.slice(1, 1 + payloadSize);
+        
         if (multipartState === 3) {
+            this.multipartBuffer = new Uint8Array(0); 
             await this.processPayload(chunk, isEncryptedHeader);
         } else if (multipartState === 2) {
-            this.multipartBuffer = chunk;
+            this.multipartBuffer = chunk; 
             this.isReceivingEncrypted = isEncryptedHeader;
         } else if (multipartState === 0) {
             const newBuffer = new Uint8Array(this.multipartBuffer.length + chunk.length);
@@ -602,22 +808,46 @@ class VectorSetup {
             newBuffer.set(chunk, this.multipartBuffer.length);
             this.multipartBuffer = newBuffer;
             await this.processPayload(this.multipartBuffer, this.isReceivingEncrypted);
-            this.multipartBuffer = new Uint8Array(0);
+            this.multipartBuffer = new Uint8Array(0); 
         }
     }
 
     async startPairing() {
-        const statusText = document.getElementById('vector-setup-status');
+        this.multipartBuffer = new Uint8Array(0);
+        this.isReceivingEncrypted = false;
+        this.isSecureChannel = false;
+        this.nonceAckSent = false;
+        this.pendingChallenge = null;
+        this.clientKeyPair = null;
+        this.robotPublicKey = null;
+        this.toRobotNonce = null;
+        this.toDeviceNonce = null;
+        this.rxKey = null;
+        this.txKey = null;
+        this.botInfo = null;
+        this.botIp = null;
+        this.rtsVersion = 5;
+
         try {
             await window.sodium.ready;
-            if (statusText) statusText.innerText = "> SCANNING...";
+            await this.updateStatus("SCANNING...", "scan_start");
+            
+            if (this.device && this.device.gatt && this.device.gatt.connected) {
+                if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'Clearing previous GATT session...');
+                this.device.gatt.disconnect();
+                await new Promise(r => setTimeout(r, 500));
+            }
+
             this.device = await navigator.bluetooth.requestDevice({
                 acceptAllDevices: true,
                 optionalServices: [this.VECTOR_SERVICE_UUID]
             });
             
-            window.appLogger.log('INFO', 'LOCAL', `Device selected: ${this.device.name || 'Unknown'}`);
-            if (statusText) statusText.innerText = `> CONNECTING TO ${this.device.name || 'VECTOR'}...`;
+            this.device.removeEventListener('gattserverdisconnected', this.boundHandleDisconnect);
+            this.device.addEventListener('gattserverdisconnected', this.boundHandleDisconnect);
+
+            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Device selected: ${this.device.name || 'Unknown'}`);
+            await this.updateStatus(`CONNECTING TO ${this.device.name || 'VECTOR'}...`, "device_selected");
 
             let server = null;
             let isConnected = false;
@@ -625,16 +855,16 @@ class VectorSetup {
             for (let i = 0; i < 3; i++) {
                 try {
                     server = await this.device.gatt.connect();
-                    window.appLogger.log('INFO', 'LOCAL', `GATT Server connected (Attempt ${i + 1}).`);
+                    if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `GATT Server connected (Attempt ${i + 1}).`);
                     await new Promise(resolve => setTimeout(resolve, 1500));
                     if (this.device.gatt.connected) {
                         isConnected = true;
                         break;
                     } else {
-                        window.appLogger.log('WARN', 'LOCAL', 'Connection unstable. GATT disconnected.');
+                        if (window.appLogger) window.appLogger.log('WARN', 'LOCAL', 'Connection unstable. GATT disconnected.');
                     }
                 } catch (e) {
-                    window.appLogger.log('ERROR', 'LOCAL', `Connection attempt ${i + 1} failed: ${e.message}`);
+                    if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', `Connection attempt ${i + 1} failed: ${e.message}`);
                     await new Promise(resolve => setTimeout(resolve, 1000));
                 }
             }
@@ -643,27 +873,32 @@ class VectorSetup {
                 throw new Error("GATT connection failed after 3 attempts.");
             }
 
-            this.device.addEventListener('gattserverdisconnected', () => {
-                window.appLogger.log('CRITICAL', 'FROM ROBOT', 'Robot severed GATT connection.');
-                if (statusText) statusText.innerText = "> OFFLINE. PLEASE RE-ENTER PAIRING MODE.";
-            });
+            await new Promise(resolve => setTimeout(resolve, 500));
 
-            if (statusText) statusText.innerText = "> ESTABLISHING RTS SESSION...";
+            await this.updateStatus("ESTABLISHING RTS SESSION...", "connect_attempt");
             
             const service = await server.getPrimaryService(this.VECTOR_SERVICE_UUID);
             this.writeChar = await service.getCharacteristic(this.VECTOR_WRITE_UUID);
             this.notifyChar = await service.getCharacteristic(this.VECTOR_NOTIFY_UUID);
             
-            window.appLogger.log('INFO', 'LOCAL', 'RTS characteristics discovered.');
+            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'RTS characteristics discovered.');
             
+            this.notifyChar.removeEventListener('characteristicvaluechanged', this.boundHandleIncomingPacket);
+            this.notifyChar.addEventListener('characteristicvaluechanged', this.boundHandleIncomingPacket);
             await this.notifyChar.startNotifications();
-            this.notifyChar.addEventListener('characteristicvaluechanged', (e) => this.handleIncomingPacket(e));
             
-            window.appLogger.log('INFO', 'LOCAL', 'Notifications enabled. Listening for handshake.');
-            if (statusText) statusText.innerText = "> AWAITING ROBOT HANDSHAKE...";
+            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'Notifications enabled. Stabilising BLE channel (500ms)...');
+            
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'Initiating handshake with requested version v5...');
+            const handshakeReq = new Uint8Array([0x01, 0x05, 0x00, 0x00, 0x00]);
+            await this.sendFramedPayload(this.writeChar, handshakeReq);
+            
+            await this.updateStatus("AWAITING ROBOT HANDSHAKE ACK...", "notifications_active");
         } catch (error) {
-            window.appLogger.log('ERROR', 'LOCAL', `Pairing failed: ${error.message}`);
-            if (statusText) statusText.innerText = `> ERR: ${error.message}`;
+            if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', `Pairing failed: ${error.message}`);
+            await this.updateStatus(`ERR: ${error.message}`, "connect_fail");
             if (this.device && this.device.gatt.connected) this.device.gatt.disconnect();
         }
     }

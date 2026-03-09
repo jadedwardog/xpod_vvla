@@ -125,7 +125,7 @@ body {
     box-shadow: 0 0 10px #fff, 0 0 20px var(--neon-green);
     position: absolute;
     top: 50%;
-    left: -5px;
+    left: 150px;
     animation: moveElectron 3s linear infinite;
 }
 
