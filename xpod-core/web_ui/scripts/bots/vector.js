@@ -1,6 +1,6 @@
 class VectorSetup {
     constructor() {
-        console.log("[xpod] VectorSetup Module Loaded - Reverted BLE Framing + Preserved CLAD v2 Fixes");
+        console.log("[xpod] VectorSetup Module Loaded - Real JWT Cloud Auth Sequence");
         this.VECTOR_WRITE_UUID = '7d2a4bda-d29b-4152-b725-2491478c5cd7';
         this.VECTOR_NOTIFY_UUID = '30619f2d-0f54-41bd-a65a-7588d8c85b45';
         this.VECTOR_SERVICE_UUID = '0000fee3-0000-1000-8000-00805f9b34fb';
@@ -12,6 +12,7 @@ class VectorSetup {
         this.isReceivingEncrypted = false;
         this.isSecureChannel = false;
         this.nonceAckSent = false;
+        this.handshakeReceived = false;
         this.pendingChallenge = null;
         this.clientKeyPair = null;
         this.robotPublicKey = null;
@@ -27,6 +28,7 @@ class VectorSetup {
         this.lastUsedWifi = null;
         this.botIp = null;
         this.rtsVersion = 5; 
+        this._pendingCloudAuth = false;
     }
 
     bufToHex(buf) {
@@ -120,6 +122,7 @@ class VectorSetup {
 
                 <div style="border-top: 1px solid rgba(0,255,0,0.3); padding-top: 10px;">
                     <button id="cloud-auth-btn" class="neon-btn" style="width: 100%; opacity: 0.5;" disabled>AUTHORISE CLOUD SESSION</button>
+                    <button id="run-diag-btn" class="neon-btn" style="width: 100%; border-color: #ffaa00; color: #ffaa00; margin-top: 10px;">RUN ADVANCED SSH DIAGNOSTICS</button>
                 </div>
             </div>
 
@@ -143,7 +146,46 @@ class VectorSetup {
         document.getElementById('ota-restart-btn').addEventListener('click', () => this.rebootRobot());
         document.getElementById('ssh-provision-btn').addEventListener('click', () => this.provisionBotSsh());
         document.getElementById('cloud-auth-btn').addEventListener('click', () => this.cloudAuthorize());
+        document.getElementById('run-diag-btn').addEventListener('click', () => this.runSshDiagnostics());
         document.getElementById('vector-abort-btn').addEventListener('click', () => this.abortSetup());
+    }
+
+    async runSshDiagnostics() {
+        if (!this.botIp) {
+            await this.updateStatus("ERR: NO BOT IP FOR DIAGNOSTICS. CONNECT WI-FI FIRST.", "error_general");
+            return;
+        }
+
+        const btn = document.getElementById('run-diag-btn');
+        btn.disabled = true;
+        btn.innerText = "RUNNING DIAGNOSTICS...";
+        await this.updateStatus("EXECUTING SSH NETWORK DIAGNOSTICS ON ROBOT...", "provisioning");
+
+        try {
+            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Requesting Advanced SSH Diagnostics for ${this.botIp}...`);
+            const response = await fetch('/api/vector/diagnostics/network', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ip: this.botIp })
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                if (window.appLogger) {
+                    window.appLogger.log('INFO', 'SSH-DIAGNOSTICS', `\n========== SSH DIAGNOSTIC REPORT ==========\n${data.report}\n===========================================`);
+                }
+                await this.updateStatus("DIAGNOSTICS COMPLETED. CHECK DIAGNOSTIC FEED.", "provisioning_success");
+            } else {
+                const errText = await response.text();
+                throw new Error(errText);
+            }
+        } catch (e) {
+            if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', `Diagnostic request failed: ${e.message}`);
+            await this.updateStatus(`DIAGNOSTICS FAILED: ${e.message}`, "error_general");
+        } finally {
+            btn.disabled = false;
+            btn.innerText = "RUN ADVANCED SSH DIAGNOSTICS";
+        }
     }
 
     async handleDisconnect() {
@@ -217,7 +259,7 @@ class VectorSetup {
             
             offset += chunkLen;
             isFirst = false;
-            if (!isLast) await new Promise(r => setTimeout(r, 100));
+            if (!isLast) await new Promise(r => setTimeout(r, 20));
         }
     }
 
@@ -251,6 +293,14 @@ class VectorSetup {
 
     async startWifiScan() {
         if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'Triggering Wi-Fi scan...');
+        await this.updateStatus("SCANNING WI-FI...", "scan_start");
+        
+        this.networks = [];
+        const select = document.getElementById('wifi-network-select');
+        if (select) {
+            select.innerHTML = '<option value="">Scanning...</option>';
+        }
+        
         await this.sendEncrypted(new Uint8Array([0x04, this.rtsVersion, 0x0C]));
     }
 
@@ -261,58 +311,88 @@ class VectorSetup {
 
     async connectToWifi(targetNetwork = null, targetPassword = null) {
         const ssid = targetNetwork || document.getElementById('wifi-network-select').value;
-        const password = targetPassword || document.getElementById('wifi-password-input').value;
+        const passwordRaw = targetPassword || document.getElementById('wifi-password-input').value;
+        const password = passwordRaw || ""; 
         
-        const net = this.networks.find(n => n.ssid === ssid);
-        if (!net && !targetNetwork) {
-            if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', `Target network metadata (${ssid}) not found.`);
+        if (!ssid) {
+            if (window.appLogger) window.appLogger.log('WARN', 'LOCAL', 'No Wi-Fi network selected.');
             return;
         }
+
+        const net = this.networks.find(n => n.ssid === ssid);
+        const ssidHexStr = net ? net.ssidHex : Array.from(ssid).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
+        const authType = net ? net.authType : 0x06; 
+        const isHidden = net ? net.hidden : false;
 
         if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Initiating connection to ${ssid}...`);
         await this.updateStatus("CONNECTING TO WI-FI...", "wifi_connecting");
 
         this.lastUsedWifi = { ssid, password };
 
-        const ssidHexBytes = new TextEncoder().encode(net ? net.ssidHex : Array.from(ssid).map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join(''));
-        const passBytes = new TextEncoder().encode(password);
+        const encoder = new TextEncoder();
+        const ssidBytes = encoder.encode(ssidHexStr);
+        const passBytes = encoder.encode(password);
 
-        const payload = new Uint8Array(3 + 1 + ssidHexBytes.length + 1 + passBytes.length + 1 + 1 + 1);
-        payload[0] = 0x04;
-        payload[1] = this.rtsVersion;
-        payload[2] = 0x06;
+        const totalLength = 3 + 1 + ssidBytes.length + 1 + passBytes.length + 1 + 1 + 1;
+        const payload = new Uint8Array(totalLength);
+
+        let offset = 0;
         
-        let pos = 3;
-        payload[pos++] = ssidHexBytes.length;
-        payload.set(ssidHexBytes, pos);
-        pos += ssidHexBytes.length;
-        
-        payload[pos++] = passBytes.length;
-        payload.set(passBytes, pos);
-        pos += passBytes.length;
-        
-        payload[pos++] = 15; 
-        payload[pos++] = net ? net.authType : 0x00;
-        payload[pos++] = net ? (net.hidden ? 1 : 0) : 0;
+        payload.set([0x04, this.rtsVersion, 0x06], offset);
+        offset += 3;
+
+        payload[offset++] = ssidBytes.length;
+
+        payload.set(ssidBytes, offset);
+        offset += ssidBytes.length;
+
+        payload[offset++] = passBytes.length;
+
+        payload.set(passBytes, offset);
+        offset += passBytes.length;
+
+        payload[offset++] = 15; 
+
+        payload[offset++] = authType;
+
+        payload[offset++] = isHidden ? 0x01 : 0x00;
 
         await this.sendEncrypted(payload);
     }
 
     async triggerOtaUpdate() {
-        const url = document.getElementById('ota-url-input').value;
+        let url = document.getElementById('ota-url-input').value.trim();
         if (!url) {
             if (window.appLogger) window.appLogger.log('WARN', 'LOCAL', 'OTA URL cannot be empty.');
             return;
         }
+
+        if (this.rtsVersion === 2 && url.startsWith('https://')) {
+            if (window.appLogger) window.appLogger.log('WARN', 'LOCAL', 'Recovery OS detected. Converting OTA URL from HTTPS to HTTP to bypass cURL certificate constraints.');
+            url = url.replace('https://', 'http://');
+            document.getElementById('ota-url-input').value = url;
+        }
+
         if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Requesting OTA update from: ${url}`);
         
         const urlBytes = new TextEncoder().encode(url);
+        
+        if (urlBytes.length > 255) {
+            if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', 'OTA URL exceeds the 255-byte standard CLAD limit.');
+            await this.updateStatus("ERR: OTA URL TOO LONG.", "error_general");
+            return;
+        }
+
         const payload = new Uint8Array(3 + 1 + urlBytes.length);
-        payload[0] = 0x04;
-        payload[1] = this.rtsVersion;
-        payload[2] = 0x0E;
-        payload[3] = urlBytes.length;
-        payload.set(urlBytes, 4);
+        let offset = 0;
+
+        payload[offset++] = 0x04;
+        payload[offset++] = this.rtsVersion;
+        payload[offset++] = 0x0E;
+        
+        payload[offset++] = urlBytes.length;
+        
+        payload.set(urlBytes, offset);
 
         await this.sendEncrypted(payload);
         
@@ -326,28 +406,49 @@ class VectorSetup {
             return;
         }
 
+        let serverIp = window.location.hostname;
+        if (serverIp === 'localhost' || serverIp === '127.0.0.1' || serverIp === '0.0.0.0') {
+            serverIp = prompt("Localhost detected. The robot needs the actual LAN IP of this server to connect over Wi-Fi (e.g., 192.168.1.50). Please enter it below:", "");
+            if (!serverIp) {
+                await this.updateStatus("ERR: PROVISIONING CANCELLED. LAN IP REQUIRED.", "error_general");
+                return;
+            }
+        }
+
         const btn = document.getElementById('ssh-provision-btn');
         btn.disabled = true;
         btn.innerText = "PROVISIONING VIA SSH...";
         await this.updateStatus("INJECTING DNS AND CERTS VIA SSH...", "provisioning");
         
         try {
-            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Requesting xpod-core to SSH provision bot at ${this.botIp}`);
+            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Requesting xpod-core to SSH provision bot at ${this.botIp} targeting server ${serverIp}`);
             const response = await fetch('/api/core/provision_bot', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ 
                     ip: this.botIp, 
                     esn: this.botInfo.esn,
-                    server_ip: window.location.hostname
+                    server_ip: serverIp
                 })
             });
             
             if (response.ok) {
-                if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'SSH Provisioning successful.');
-                await this.updateStatus("PROVISIONING COMPLETE. READY FOR CLOUD AUTH.", "provisioning_success");
+                if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'SSH Provisioning successful. Persisted iptables via systemd. Issuing hardware reboot...');
+                await this.updateStatus("PROVISIONING COMPLETE. ROBOT REBOOTING...", "provisioning_success");
                 
-                btn.innerText = "PROVISIONED [OK]";
+                try {
+                    await fetch('/api/vector/diagnostics/reboot', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ip: this.botIp })
+                    });
+                } catch(e) {}
+                
+                if (this.device && this.device.gatt.connected) {
+                    this.device.gatt.disconnect();
+                }
+                
+                btn.innerText = "PROVISIONED [REBOOTING]";
                 btn.style.color = "#00ff00";
                 btn.style.borderColor = "#00ff00";
                 btn.style.opacity = "0.4";
@@ -355,8 +456,12 @@ class VectorSetup {
                 btn.disabled = true;
                 
                 const authBtn = document.getElementById('cloud-auth-btn');
-                authBtn.disabled = false;
-                authBtn.style.opacity = '1';
+                if (authBtn) {
+                    authBtn.disabled = false;
+                    authBtn.style.opacity = '1';
+                    authBtn.innerText = "RECONNECT AFTER REBOOT";
+                }
+
             } else {
                 const errText = await response.text();
                 throw new Error(errText);
@@ -372,6 +477,13 @@ class VectorSetup {
     }
 
     async cloudAuthorize() {
+        if (!this.isSecureChannel) {
+            if (window.appLogger) window.appLogger.log('WARN', 'LOCAL', 'BLE session closed. Triggering re-pair sequence for Cloud Auth.');
+            this._pendingCloudAuth = true;
+            await this.startPairing();
+            return;
+        }
+        
         if (!this.botInfo || (this.botInfo.wifiState !== 1)) {
             if (window.appLogger) window.appLogger.log('WARN', 'LOCAL', 'Robot is offline. Attempting Wi-Fi reconnection before authorisation.');
             if (this.lastUsedWifi) {
@@ -383,41 +495,52 @@ class VectorSetup {
             }
         }
 
-        const sessionToken = "xpod_token";
+        let sessionToken = "";
+        try {
+            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Fetching valid JWT from xpod-core for BLE injection...`);
+            const jwtResponse = await fetch('/api/core/get_jwt');
+            const jwtData = await jwtResponse.json();
+            sessionToken = jwtData.token;
+        } catch (e) {
+            if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', `Failed to fetch JWT: ${e.message}`);
+            await this.updateStatus("ERR: FAILED TO GENERATE JWT.", "error_general");
+            return;
+        }
+
         const clientName = "Web-Setup";
         const appId = "com.anki.vector";
         
         if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Preparing Cloud Authorisation Request [V5]`);
-        if (window.appLogger) window.appLogger.log('DEBUG', 'LOCAL', `Auth Params -> Token: ${sessionToken}, Client: ${clientName}, AppId: ${appId}`);
+        if (window.appLogger) window.appLogger.log('DEBUG', 'LOCAL', `Auth Params -> Token Length: ${sessionToken.length}, Client: ${clientName}, AppId: ${appId}`);
 
         const encoder = new TextEncoder();
         const tokenBytes = encoder.encode(sessionToken);
         const nameBytes = encoder.encode(clientName);
         const appBytes = encoder.encode(appId);
 
-        const totalLength = 3 + 1 + tokenBytes.length + 1 + nameBytes.length + 1 + appBytes.length;
+        const totalLength = 3 + 2 + tokenBytes.length + 1 + nameBytes.length + 1 + appBytes.length;
         const payload = new Uint8Array(totalLength);
 
         let offset = 0;
         payload.set([0x04, this.rtsVersion, 0x1D], offset);
         offset += 3;
 
-        payload[offset] = tokenBytes.length;
-        offset += 1;
+        payload[offset++] = tokenBytes.length & 0xFF;
+        payload[offset++] = (tokenBytes.length >> 8) & 0xFF;
+
         payload.set(tokenBytes, offset);
         offset += tokenBytes.length;
 
-        payload[offset] = nameBytes.length;
-        offset += 1;
+        payload[offset++] = nameBytes.length;
         payload.set(nameBytes, offset);
         offset += nameBytes.length;
 
-        payload[offset] = appBytes.length;
-        offset += 1;
+        payload[offset++] = appBytes.length;
         payload.set(appBytes, offset);
+        offset += appBytes.length;
 
-        if (window.appLogger) window.appLogger.log('DEBUG', 'LOCAL', `Cloud Auth Payload Packed (${totalLength} bytes): ${this.bufToHex(payload)}`);
-        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Submitting Cloud Authorisation Request to Robot with token: ${sessionToken}`);
+        if (window.appLogger) window.appLogger.log('DEBUG', 'LOCAL', `Cloud Auth Payload Packed (${totalLength} bytes)`);
+        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Submitting Cloud Authorisation Request to Robot with structurally valid JWT...`);
         
         await this.updateStatus("AUTHORISING CLOUD SESSION WITH ROBOT...", "provisioning");
 
@@ -436,22 +559,33 @@ class VectorSetup {
     }
 
     parseWifiScan(data) {
+        if (data.length === 0) return;
         const status = data[0];
-        const count = data[1];
-        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Scan Result - Status: ${status}, Networks found: ${count}`);
         
-        const select = document.getElementById('wifi-network-select');
-        const wifiSection = document.getElementById('wifi-connection-section');
-        if (select) select.innerHTML = '';
-        this.networks = [];
+        if (status === 1) {
+             if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Wi-Fi scan complete. Total networks found: ${this.networks.length}`);
+             this.updateStatus(`WI-FI SCAN COMPLETE. FOUND ${this.networks.length} NETWORKS.`, "scan_complete");
+             
+             const select = document.getElementById('wifi-network-select');
+             if (select && this.networks.length === 0) {
+                 select.innerHTML = '<option value="">No networks found</option>';
+             }
+             return;
+        }
 
+        if (status !== 0 || data.length < 2) return; 
+
+        const count = data[1];
+        if (window.appLogger) window.appLogger.log('DEBUG', 'LOCAL', `Scan Chunk Received - Networks in chunk: ${count}`);
+        
         let offset = 2; 
         const decoder = new TextDecoder();
 
         for (let i = 0; i < count; i++) {
             if (offset + 3 > data.length) break;
+            
             const authType = data[offset];
-            const signal = data[offset + 1];
+            const signalRaw = data[offset + 1];
             const ssidLen = data[offset + 2];
             
             if (offset + 3 + ssidLen > data.length) break;
@@ -460,24 +594,49 @@ class VectorSetup {
             
             let ssid = "";
             for (let j = 0; j < ssidHexASCII.length; j += 2) {
-                ssid += String.fromCharCode(parseInt(ssidHexASCII.slice(j, j + 2), 16));
+                const hexByte = ssidHexASCII.slice(j, j + 2);
+                if (hexByte.length === 2) {
+                    ssid += String.fromCharCode(parseInt(hexByte, 16));
+                }
+            }
+
+            let hidden = false;
+            if (data.length > offset + 3 + ssidLen) {
+                hidden = data[offset + 3 + ssidLen] === 0x01;
+            }
+
+            const displaySignal = signalRaw <= 4 ? signalRaw * 25 : signalRaw;
+
+            if (!this.networks.some(n => n.ssid === ssid)) {
+                this.networks.push({ 
+                    ssid, 
+                    ssidHex: ssidHexASCII, 
+                    authType, 
+                    signal: displaySignal, 
+                    hidden 
+                });
+
+                this.networks.sort((a, b) => b.signal - a.signal);
+
+                const select = document.getElementById('wifi-network-select');
+                if (select) {
+                    select.innerHTML = ''; 
+                    this.networks.forEach(net => {
+                        const opt = document.createElement('option');
+                        opt.value = net.ssid;
+                        opt.text = `${net.ssid} (${net.signal}%)`;
+                        select.appendChild(opt);
+                    });
+                }
+
+                const wifiSection = document.getElementById('wifi-connection-section');
+                if (wifiSection) wifiSection.style.display = 'block';
+
+                if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Discovered Network: ${ssid} [Signal: ${signalRaw} (${displaySignal}%), Auth: ${authType}, Hidden: ${hidden}]`);
             }
             
-            const hidden = data[offset + 3 + ssidLen] === 0x01;
-            const provisioned = data[offset + 4 + ssidLen] === 0x01;
-
-            this.networks.push({ ssid, ssidHex: ssidHexASCII, authType, signal, hidden, provisioned });
-
-            const opt = document.createElement('option');
-            opt.value = ssid;
-            opt.text = `${ssid} (${signal}%)`;
-            if (select) select.appendChild(opt);
-
-            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Network ${i + 1}: ${ssid} [Signal: ${signal}, Auth: ${authType}, Hidden: ${hidden}, Provisioned: ${provisioned}]`);
-            offset += 5 + ssidLen;
+            offset += 4 + ssidLen;
         }
-
-        if (wifiSection) wifiSection.style.display = 'block';
     }
 
     async parseStatusResponse(data) {
@@ -533,6 +692,19 @@ class VectorSetup {
         if (wifiState === 1 && !this.botIp) {
             this.requestWifiIp();
         }
+
+        if (this._pendingCloudAuth) {
+            if (wifiState === 1) {
+                if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Wi-Fi confirmed ONLINE. Allowing daemons to settle before Cloud Authorisation...`);
+                this._pendingCloudAuth = false;
+                await this.updateStatus("DAEMONS SETTLING. PREPARING CLOUD AUTH...", "provisioning");
+                setTimeout(() => this.cloudAuthorize(), 8000);
+            } else {
+                if (window.appLogger) window.appLogger.log('WARN', 'LOCAL', `Robot offline. Polling status again in 2 seconds...`);
+                await this.updateStatus("WAITING FOR ROBOT TO CONNECT TO WI-FI...", "wifi_connecting");
+                setTimeout(() => this.requestStatus(), 2000);
+            }
+        }
     }
 
     async handleOtaProgress(data) {
@@ -546,7 +718,12 @@ class VectorSetup {
         const progressText = document.getElementById('ota-progress-text');
         const restartBtn = document.getElementById('ota-restart-btn');
 
-        if (statusCode === 0x02) {
+        if (statusCode === 0x01) {
+            const percentage = total > 0 ? Math.min(100, Math.floor((current / total) * 100)) : 0;
+            if (progressBar) progressBar.style.width = `${percentage}%`;
+            if (progressText) progressText.innerText = `${percentage}% (Downloading)`;
+            await this.updateStatus(`OTA: DOWNLOADING...`, "ota_start");
+        } else if (statusCode === 0x02) {
             const percentage = total > 0 ? Math.min(100, Math.floor((current / total) * 100)) : 0;
             if (progressBar) progressBar.style.width = `${percentage}%`;
             if (progressText) progressText.innerText = `${percentage}% (Processing)`;
@@ -559,9 +736,12 @@ class VectorSetup {
         } else if (statusCode === 0x04) {
             await this.updateStatus("ROBOT REBOOTING. CONNECTION WILL DROP.", "disconnect");
             if (window.appLogger) window.appLogger.log('WARN', 'LOCAL', 'Robot issued reboot command after OTA.');
-        } else if (statusCode === 0x05) {
-            await this.updateStatus("OTA FAILED. CHECK LOGS.", "error_general");
-            if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', 'OTA error status received from robot.');
+        } else {
+            await this.updateStatus(`OTA FAILED (Code: 0x${statusCode.toString(16).toUpperCase()}). CHECK URL/LOGS.`, "error_general");
+            if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', `OTA error status received from robot: ${statusCode} (0x${statusCode.toString(16).toUpperCase()})`);
+            if (progressBar) progressBar.style.width = `100%`;
+            if (progressBar) progressBar.style.backgroundColor = `#ff003c`;
+            if (progressText) progressText.innerText = `ERROR: 0x${statusCode.toString(16).toUpperCase()}`;
         }
     }
 
@@ -593,16 +773,34 @@ class VectorSetup {
                     await this.sendEncrypted(new Uint8Array([0x04, this.rtsVersion, 0x12, 0x05]));
                     this.requestStatus(); 
                 } else if (cladTag === 0x07) {
+                    const pktRtsVersion = plaintext[1];
                     const ssidLen = plaintext[3];
-                    const connectResult = plaintext[5 + ssidLen];
+                    const wifiState = plaintext[4 + ssidLen];
+                    
                     let resultMsg = "FAILURE";
-                    if (connectResult === 0x00) resultMsg = "SUCCESS";
-                    else if (connectResult === 0x02) resultMsg = "INVALID PASSWORD";
+                    let isSuccess = false;
+
+                    if (pktRtsVersion >= 3) {
+                        const connectResult = plaintext[5 + ssidLen];
+                        if (connectResult === 0x00) {
+                            resultMsg = "SUCCESS";
+                            isSuccess = true;
+                        } else if (connectResult === 0x02) {
+                            resultMsg = "INVALID PASSWORD";
+                        }
+                    } else {
+                        if (wifiState === 0x02) {
+                            resultMsg = "SUCCESS (Inferred)";
+                            isSuccess = true;
+                        } else {
+                            resultMsg = "FAILURE (Inferred)";
+                        }
+                    }
                     
                     if (window.appLogger) window.appLogger.log('INFO', 'FROM ROBOT (SECURE)', `Wi-Fi connection result: ${resultMsg}`);
-                    await this.updateStatus(`WI-FI: ${resultMsg}`, connectResult === 0x00 ? "success" : "wifi_auth_failed");
+                    await this.updateStatus(`WI-FI: ${resultMsg}`, isSuccess ? "success" : "wifi_auth_failed");
                     
-                    if (connectResult === 0x00) {
+                    if (isSuccess) {
                         this.requestStatus();
                         setTimeout(() => this.requestWifiIp(), 2000);
                     }
@@ -637,10 +835,23 @@ class VectorSetup {
                     if (window.appLogger) window.appLogger.log('INFO', 'FROM ROBOT (SECURE)', `Cloud Auth Result Received! Success: ${success}, Status Code: ${statusCode}`);
                     if (window.appLogger) window.appLogger.log('DEBUG', 'FROM ROBOT (SECURE)', `Extracted Token GUID: '${guid}' (Length: ${guidLen})`);
                     
-                    if (success) {
-                        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Robot Accepted Cloud Session. Authorised GUID: ${guid}`);
-                        await this.updateStatus("ROBOT PAIRED! REGISTERING WITH SIDECAR...", "provisioning");
-                        this.requestStatus();
+                    if (success && statusCode === 0x04) {
+                        if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Robot Accepted Cloud Session. Checkmark displayed. Authorised GUID: ${guid}`);
+                        await this.updateStatus("VECTOR IS PAIRED! CHECKMARK DISPLAYED. WAKING UP...", "provisioning_success");
+                        
+                        const authBtn = document.getElementById('cloud-auth-btn');
+                        if(authBtn) {
+                            authBtn.innerText = "AUTHENTICATED [OK]";
+                            authBtn.style.color = "#00ff00";
+                            authBtn.style.borderColor = "#00ff00";
+                            authBtn.style.opacity = "0.4";
+                            authBtn.disabled = true;
+                        }
+
+                        if (this.device && this.device.gatt.connected) {
+                            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'Proactively terminating GATT connection to allow hardware wakeup...');
+                            this.device.gatt.disconnect();
+                        }
                         
                         try {
                             if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Invoking Sidecar API: POST /api/vector/sidecar/connect`);
@@ -655,15 +866,6 @@ class VectorSetup {
                             if (regResponse.ok) {
                                 if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Sidecar API Registration Successful.`);
                                 await this.updateStatus("ACCOUNT PAIRED & REGISTERED! READY FOR SIDECAR.", "provisioning_success");
-                                
-                                const authBtn = document.getElementById('cloud-auth-btn');
-                                if(authBtn) {
-                                    authBtn.innerText = "AUTHENTICATED [OK]";
-                                    authBtn.style.color = "#00ff00";
-                                    authBtn.style.borderColor = "#00ff00";
-                                    authBtn.style.opacity = "0.4";
-                                    authBtn.disabled = true;
-                                }
                             } else {
                                 const errText = await regResponse.text();
                                 if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', `Sidecar API Registration Failed. HTTP ${regResponse.status}: ${errText}`);
@@ -709,8 +911,16 @@ class VectorSetup {
         if (setupMsgType === 0x01 && dataPayload.length === 4) {
             const version = new DataView(dataPayload.buffer, dataPayload.byteOffset, dataPayload.byteLength).getUint32(0, true);
             this.rtsVersion = version; 
-            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Robot acknowledged RTS protocol version: v${version}. Updating internal tracking.`);
+            
+            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Robot transmitted RTS protocol version: v${version}. Acknowledging.`);
+            
+            this.handshakeReceived = true;
             await this.updateStatus(`PROTOCOL VERSION NEGOTIATED (v${version}).`, "send_version");
+            
+            if (this.writeChar) {
+                const ack = new Uint8Array([0x01, version, 0x00, 0x00, 0x00]);
+                await this.sendFramedPayload(this.writeChar, ack);
+            }
             return;
         }
         
@@ -718,21 +928,27 @@ class VectorSetup {
             const version = dataPayload[0];
             const cladTag = dataPayload[1];
             const cladData = dataPayload.slice(2);
+            
             if (cladTag === 0x01 && cladData.length >= 32) {
+                if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Robot sent RtsConnRequest. Extracting public key and sending RtsConnResponse.`);
+                this.handshakeReceived = true;
                 this.robotPublicKey = cladData.slice(0, 32);
                 if (!this.clientKeyPair) this.clientKeyPair = window.sodium.crypto_kx_keypair();
                 const connRes = new Uint8Array(36);
                 connRes[0] = 0x04;
                 connRes[1] = version;
-                connRes[2] = 0x02;
-                connRes[3] = 0x00;
+                connRes[2] = 0x02; 
+                connRes[3] = 0x00; 
                 connRes.set(this.clientKeyPair.publicKey, 4);
                 await this.sendFramedPayload(this.writeChar, connRes);
             } else if (cladTag === 0x03 && cladData.length >= 48) {
                 this.toRobotNonce = cladData.slice(0, 24);
                 this.toDeviceNonce = cladData.slice(24, 48);
+                if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `Nonces received.`);
                 await this.updateStatus("SUCCESS! CHECK VECTOR SCREEN FOR PIN.", "key_received");
                 document.getElementById('pin-entry-section').style.display = 'block';
+            } else if (cladTag === 0x10) {
+                if (window.appLogger) window.appLogger.log('ERROR', 'FROM ROBOT', `Robot sent state machine reset/error (Clad Tag 0x10).`);
             }
         }
     }
@@ -817,16 +1033,16 @@ class VectorSetup {
         this.isReceivingEncrypted = false;
         this.isSecureChannel = false;
         this.nonceAckSent = false;
+        this.handshakeReceived = false;
         this.pendingChallenge = null;
-        this.clientKeyPair = null;
-        this.robotPublicKey = null;
         this.toRobotNonce = null;
         this.toDeviceNonce = null;
+        this.clientKeyPair = null;
+        this.robotPublicKey = null;
         this.rxKey = null;
         this.txKey = null;
-        this.botInfo = null;
         this.botIp = null;
-        this.rtsVersion = 5;
+        this.botInfo = null;
 
         try {
             await window.sodium.ready;
@@ -856,7 +1072,7 @@ class VectorSetup {
                 try {
                     server = await this.device.gatt.connect();
                     if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', `GATT Server connected (Attempt ${i + 1}).`);
-                    await new Promise(resolve => setTimeout(resolve, 1500));
+                    
                     if (this.device.gatt.connected) {
                         isConnected = true;
                         break;
@@ -873,11 +1089,23 @@ class VectorSetup {
                 throw new Error("GATT connection failed after 3 attempts.");
             }
 
-            await new Promise(resolve => setTimeout(resolve, 500));
-
             await this.updateStatus("ESTABLISHING RTS SESSION...", "connect_attempt");
             
-            const service = await server.getPrimaryService(this.VECTOR_SERVICE_UUID);
+            let service = null;
+            for (let j = 0; j < 3; j++) {
+                try {
+                    service = await server.getPrimaryService(this.VECTOR_SERVICE_UUID);
+                    break;
+                } catch (e) {
+                    if (window.appLogger) window.appLogger.log('WARN', 'LOCAL', `Service discovery failed (Attempt ${j+1}): ${e.message}. Retrying in 500ms...`);
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+            }
+            
+            if (!service) {
+                throw new Error("Failed to discover RTS primary service after multiple attempts.");
+            }
+            
             this.writeChar = await service.getCharacteristic(this.VECTOR_WRITE_UUID);
             this.notifyChar = await service.getCharacteristic(this.VECTOR_NOTIFY_UUID);
             
@@ -887,15 +1115,17 @@ class VectorSetup {
             this.notifyChar.addEventListener('characteristicvaluechanged', this.boundHandleIncomingPacket);
             await this.notifyChar.startNotifications();
             
-            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'Notifications enabled. Stabilising BLE channel (500ms)...');
+            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'Notifications enabled. Awaiting organic handshake broadcast from robot...');
+            await this.updateStatus("SYNCHRONISING SECURE HANDSHAKE...", "notifications_active");
             
-            await new Promise(resolve => setTimeout(resolve, 500));
-            
-            if (window.appLogger) window.appLogger.log('INFO', 'LOCAL', 'Initiating handshake with requested version v5...');
-            const handshakeReq = new Uint8Array([0x01, 0x05, 0x00, 0x00, 0x00]);
-            await this.sendFramedPayload(this.writeChar, handshakeReq);
-            
-            await this.updateStatus("AWAITING ROBOT HANDSHAKE ACK...", "notifications_active");
+            setTimeout(async () => {
+                if (!this.handshakeReceived && this.writeChar && this.device && this.device.gatt.connected) {
+                    if (window.appLogger) window.appLogger.log('WARN', 'LOCAL', 'Opening transmission missed. Initiating manual protocol negotiation...');
+                    const handshakeReq = new Uint8Array([0x01, this.rtsVersion, 0x00, 0x00, 0x00]);
+                    await this.sendFramedPayload(this.writeChar, handshakeReq);
+                }
+            }, 2000);
+
         } catch (error) {
             if (window.appLogger) window.appLogger.log('ERROR', 'LOCAL', `Pairing failed: ${error.message}`);
             await this.updateStatus(`ERR: ${error.message}`, "connect_fail");

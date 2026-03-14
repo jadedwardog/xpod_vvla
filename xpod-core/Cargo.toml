@@ -6,7 +6,7 @@ authors.workspace = true
 
 [dependencies]
 tokio.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["ws"] }
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
@@ -20,6 +20,8 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls = { version = "0.23", features = ["ring"] }
 tower-http = { version = "0.5", features = ["fs"] }
 http-body-util = "0.1"
+jsonwebtoken = "9.3.0"
+base64 = "0.22.1"
 
 candle-core = "0.8.2"
 candle-nn = "0.8.2"

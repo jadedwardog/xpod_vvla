@@ -200,6 +200,170 @@ async fn start_cloud_diagnostics(Json(payload): Json<DiagnosticRequest>) -> impl
     }))
 }
 
+async fn check_cloud_ready(Json(payload): Json<DiagnosticRequest>) -> impl IntoResponse {
+    let ip = payload.ip.clone();
+    
+    let is_ready = tokio::task::spawn_blocking(move || {
+        println!("[INFO] Vector Sidecar: Checking cloud daemon state for {}...", ip);
+        
+        let tcp = match std::net::TcpStream::connect(format!("{}:22", ip)) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[ERROR] Vector Sidecar: SSH TCP connect failed: {}", e);
+                return false;
+            }
+        };
+        
+        let mut sess = match Session::new() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[ERROR] Vector Sidecar: SSH session init failed: {}", e);
+                return false;
+            }
+        };
+        
+        sess.set_tcp_stream(tcp);
+        if let Err(e) = sess.handshake() {
+            eprintln!("[ERROR] Vector Sidecar: SSH handshake failed: {}", e);
+            return false;
+        }
+        
+        let key_path = std::path::Path::new("oskr.key");
+        let key_path = if key_path.exists() {
+            key_path
+        } else {
+            std::path::Path::new("../oskr.key")
+        };
+        
+        if let Err(e) = sess.userauth_pubkey_file("root", None, key_path, None) {
+            eprintln!("[ERROR] Vector Sidecar: SSH auth failed: {}", e);
+            return false;
+        }
+        
+        let mut channel = match sess.channel_session() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[ERROR] Vector Sidecar: SSH channel failed: {}", e);
+                return false;
+            }
+        };
+        
+        if let Err(e) = channel.exec("systemctl is-active vic-cloud") {
+            eprintln!("[ERROR] Vector Sidecar: SSH exec failed: {}", e);
+            return false;
+        }
+        
+        let mut output = String::new();
+        let _ = channel.read_to_string(&mut output);
+        let _ = channel.close();
+        
+        output.trim() == "active"
+    }).await.unwrap_or(false);
+
+    Json(serde_json::json!({
+        "ready": is_ready
+    }))
+}
+
+async fn run_network_diagnostics(Json(payload): Json<DiagnosticRequest>) -> impl IntoResponse {
+    let ip = payload.ip.clone();
+    
+    let report = tokio::task::spawn_blocking(move || {
+        let tcp = match std::net::TcpStream::connect(format!("{}:22", ip)) {
+            Ok(t) => t,
+            Err(e) => return format!("TCP Connect failed: {}", e),
+        };
+        
+        let mut sess = Session::new().unwrap();
+        sess.set_tcp_stream(tcp);
+        sess.handshake().unwrap();
+        
+        let key_path = std::path::Path::new("oskr.key");
+        let key_path = if key_path.exists() { key_path } else { std::path::Path::new("../oskr.key") };
+        sess.userauth_pubkey_file("root", None, key_path, None).unwrap();
+        
+        let mut report = String::new();
+        
+        let cmds = vec![
+            ("System Date/Time", "date"),
+            ("DNS Resolution", "ping -c 1 accounts.anki.com"),
+            ("Hosts File Overrides", "cat /etc/hosts | grep anki"),
+            ("IPTables NAT Rules", "iptables -t nat -L OUTPUT -n -v"),
+            ("SystemD xPod Route Status", "systemctl status xpod-route.service"),
+            ("Curl Test to Core", "curl -v -k https://accounts.anki.com/1/sessions"),
+        ];
+        
+        for (title, cmd) in cmds {
+            report.push_str(&format!("--- {} ---\n> {}\n", title, cmd));
+            if let Ok(mut channel) = sess.channel_session() {
+                let _ = channel.exec(cmd);
+                let mut output = String::new();
+                let _ = channel.read_to_string(&mut output);
+                report.push_str(&output);
+                report.push_str("\n\n");
+            }
+        }
+        report
+    }).await.unwrap_or_else(|e| format!("Diagnostic task failed: {}", e));
+
+    Json(serde_json::json!({
+        "status": "success",
+        "report": report
+    }))
+}
+
+async fn reboot_robot(Json(payload): Json<DiagnosticRequest>) -> impl IntoResponse {
+    let ip = payload.ip.clone();
+    
+    tokio::task::spawn_blocking(move || {
+        println!("[INFO] Vector Sidecar: Issuing hardware reboot to {} to restore IPC sockets...", ip);
+        
+        let tcp = match std::net::TcpStream::connect(format!("{}:22", ip)) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[ERROR] Vector Sidecar: SSH TCP connect failed: {}", e);
+                return;
+            }
+        };
+        
+        let mut sess = match Session::new() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[ERROR] Vector Sidecar: SSH session init failed: {}", e);
+                return;
+            }
+        };
+        
+        sess.set_tcp_stream(tcp);
+        if let Err(e) = sess.handshake() {
+            eprintln!("[ERROR] Vector Sidecar: SSH handshake failed: {}", e);
+            return;
+        }
+        
+        let key_path = std::path::Path::new("oskr.key");
+        let key_path = if key_path.exists() {
+            key_path
+        } else {
+            std::path::Path::new("../oskr.key")
+        };
+        
+        if let Err(e) = sess.userauth_pubkey_file("root", None, key_path, None) {
+            eprintln!("[ERROR] Vector Sidecar: SSH auth failed: {}", e);
+            return;
+        }
+        
+        if let Ok(mut channel) = sess.channel_session() {
+            let _ = channel.exec("/sbin/reboot");
+            println!("[INFO] Vector Sidecar: Reboot command issued successfully.");
+        }
+    }).await.ok();
+
+    Json(serde_json::json!({
+        "status": "success",
+        "message": "Reboot command sent to robot."
+    }))
+}
+
 async fn run_grpc_client(ip: String, token: String, state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let uri = format!("https://{}:443", ip);
     println!("[DEBUG] Vector Sidecar: Establishing gRPC TLS connection to {} using token GUID [{}]", uri, token);
@@ -322,6 +486,9 @@ async fn main() {
         .route("/ble/connect_wifi", get(ble_api::connect_wifi))
         .route("/ble/disconnect", get(ble_api::disconnect_ble))
         .route("/diagnostics/tail", post(start_cloud_diagnostics))
+        .route("/diagnostics/network", post(run_network_diagnostics))
+        .route("/diagnostics/cloud_ready", post(check_cloud_ready))
+        .route("/diagnostics/reboot", post(reboot_robot))
         .route("/sidecar/connect", post(connect_robot))
         .route("/sidecar/status", get(get_status))
         .route("/sidecar/disconnect", post(disconnect_robot))
