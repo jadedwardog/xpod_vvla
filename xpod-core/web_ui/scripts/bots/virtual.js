@@ -16,6 +16,8 @@ class VirtualSidecar {
         this.sensoryLoopInterval = null;
         this.audioAnimationId = null;
         this.isConnected = false;
+        this.visionEnabled = true;
+        this.hearingEnabled = false;
 
         this.boundUpdateAudio = this.updateAudio.bind(this);
     }
@@ -54,18 +56,24 @@ class VirtualSidecar {
             </div>
 
             <div style="margin-bottom: 15px; padding: 10px; background: rgba(0, 30, 0, 0.4); border-left: 3px solid #00ff00;">
-                <h3 style="margin-top: 0; font-size: 0.9rem; color: #fff; text-shadow: 0 0 5px #fff; display: flex; justify-content: space-between;">
+                <h3 style="margin-top: 0; font-size: 0.9rem; color: #fff; text-shadow: 0 0 5px #fff; display: flex; justify-content: space-between; align-items: center;">
                     <span>[1] VISUAL PERCEPTION (EYES)</span>
-                    <span id="vs-fps-counter" style="color: #00ff00; font-size: 0.7rem;">0 FPS</span>
+                    <div>
+                        <button id="vs-toggle-vision" class="neon-btn" style="padding: 2px 8px; font-size: 0.7rem; border-color: #00ff00; color: #00ff00; width: auto;">ONLINE</button>
+                        <span id="vs-fps-counter" style="color: #00ff00; font-size: 0.7rem; margin-left: 10px;">0 FPS</span>
+                    </div>
                 </h3>
-                <div style="position: relative; background: #000; border: 1px solid rgba(0,255,0,0.3); height: 180px; display: flex; justify-content: center; align-items: center; overflow: hidden;">
+                <div style="position: relative; background: #000; border: 1px solid rgba(0,255,0,0.3); height: 180px; display: flex; justify-content: center; align-items: center; overflow: hidden; margin-top: 8px;">
                     <video id="vs-webcam" autoplay playsinline muted style="width: 100%; height: 100%; object-fit: cover; filter: grayscale(100%) contrast(1.2); opacity: 0.7;"></video>
                 </div>
             </div>
 
             <div style="margin-bottom: 15px; padding: 10px; background: rgba(0, 30, 0, 0.4); border-left: 3px solid #00ff00;">
-                <h3 style="margin-top: 0; font-size: 0.9rem; color: #fff; text-shadow: 0 0 5px #fff;">[2] AUDITORY PERCEPTION (EARS)</h3>
-                <div id="vs-audio-visualizer" style="height: 40px; display: flex; align-items: flex-end; gap: 2px; border-bottom: 1px solid rgba(0,255,0,0.3); padding-bottom: 5px;">
+                <h3 style="margin-top: 0; font-size: 0.9rem; color: #fff; text-shadow: 0 0 5px #fff; display: flex; justify-content: space-between; align-items: center;">
+                    <span>[2] AUDITORY PERCEPTION (EARS)</span>
+                    <button id="vs-toggle-hearing" class="neon-btn" style="padding: 2px 8px; font-size: 0.7rem; border-color: #ff003c; color: #ff003c; width: auto;">OFFLINE</button>
+                </h3>
+                <div id="vs-audio-visualizer" style="height: 40px; display: flex; align-items: flex-end; gap: 2px; border-bottom: 1px solid rgba(0,255,0,0.3); padding-bottom: 5px; margin-top: 8px;">
                 </div>
             </div>
 
@@ -157,6 +165,38 @@ class VirtualSidecar {
             this.shutdown();
         });
 
+        document.getElementById('vs-toggle-vision').addEventListener('click', (e) => {
+            this.visionEnabled = !this.visionEnabled;
+            const btn = e.target;
+            if (this.visionEnabled) {
+                btn.innerText = "ONLINE";
+                btn.style.borderColor = "#00ff00";
+                btn.style.color = "#00ff00";
+                this.log("Visual perception ONLINE.", "SYSTEM");
+            } else {
+                btn.innerText = "OFFLINE";
+                btn.style.borderColor = "#ff003c";
+                btn.style.color = "#ff003c";
+                this.log("Visual perception OFFLINE.", "SYSTEM");
+            }
+        });
+
+        document.getElementById('vs-toggle-hearing').addEventListener('click', (e) => {
+            this.hearingEnabled = !this.hearingEnabled;
+            const btn = e.target;
+            if (this.hearingEnabled) {
+                btn.innerText = "ONLINE";
+                btn.style.borderColor = "#00ff00";
+                btn.style.color = "#00ff00";
+                this.log("Auditory perception ONLINE.", "SYSTEM");
+            } else {
+                btn.innerText = "OFFLINE";
+                btn.style.borderColor = "#ff003c";
+                btn.style.color = "#ff003c";
+                this.log("Auditory perception OFFLINE.", "SYSTEM");
+            }
+        });
+
         const sendChat = () => {
             const input = document.getElementById('vs-chat-input');
             if (input && input.value.trim() !== '') {
@@ -208,7 +248,7 @@ class VirtualSidecar {
             silentGain.connect(this.audioCtx.destination);
 
             this.processor.onaudioprocess = (e) => {
-                if (!this.isConnected) return;
+                if (!this.isConnected || !this.hearingEnabled) return;
                 
                 const inputData = e.inputBuffer.getChannelData(0);
                 const pcm16 = new Int16Array(inputData.length);
@@ -309,6 +349,8 @@ class VirtualSidecar {
                         if (arousalBar) arousalBar.style.width = `${packet.arousal * 100}%`;
                         if (valenceBar) valenceBar.style.width = `${packet.valence * 100}%`;
                         if (batEl) batEl.innerText = `${Math.round(packet.battery * 100)}%`;
+                    } else if (packet.type === 'error') {
+                        this.log(`COGNITIVE COLLAPSE: ${packet.message}`, "ERROR");
                     }
                 } catch (e) {
                     this.log(`Failed to parse soul intent: ${event.data}`, "ERROR");
@@ -403,16 +445,22 @@ class VirtualSidecar {
         canvas.width = 160; 
         canvas.height = 120;
         const videoEl = document.getElementById('vs-webcam');
+        
         this.sensoryLoopInterval = setInterval(() => {
             if (!this.isConnected || !videoEl) return;
-            ctx.drawImage(videoEl, 0, 0, 160, 120);
-            const frame = canvas.toDataURL('image/jpeg', 0.5);
-            this.sendTelemetry({ type: "visual", data: frame });
+            
+            if (this.visionEnabled) {
+                ctx.drawImage(videoEl, 0, 0, 160, 120);
+                const frame = canvas.toDataURL('image/jpeg', 0.5);
+                this.sendTelemetry({ type: "visual", data: frame });
+            }
+            
             const fpsEl = document.getElementById('vs-fps-counter');
-            if (fpsEl) fpsEl.innerText = `${Math.floor(Math.random()*2) + 14} FPS`;
+            if (fpsEl) fpsEl.innerText = this.visionEnabled ? `1 FPS (Cog-Lock)` : `STANDBY`;
+            
             const latEl = document.getElementById('vs-prop-latency');
             if (latEl) latEl.innerText = `${Math.floor(Math.random()*15) + 20}ms`;
-        }, 1000 / 15);
+        }, 1000); 
     }
 }
 
