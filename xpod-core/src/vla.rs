@@ -9,7 +9,7 @@ pub struct VlaModel {
 }
 
 impl VlaModel {
-    pub fn new() -> Result<Self, Box<dyn Error>> {
+    pub fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
         let device = if candle_core::utils::cuda_is_available() {
             Device::new_cuda(0)?
         } else if candle_core::utils::metal_is_available() {
@@ -22,23 +22,25 @@ impl VlaModel {
         Ok(Self { device })
     }
 
-    pub fn process_frame(&self, frame_data: &[u8]) -> Result<Tensor, Box<dyn Error>> {
+    pub fn process_frame(&self, frame_data: &[u8]) -> Result<Tensor, Box<dyn Error + Send + Sync>> {
         let cursor = Cursor::new(frame_data);
-        let img = ImageReader::new(cursor).with_guessed_format()?.decode()?;
+        let img = ImageReader::new(cursor)
+            .with_guessed_format()?
+            .decode()?;
         
         let resized = img.resize_exact(224, 224, image::imageops::FilterType::Triangle);
         let rgb_img = resized.to_rgb8();
         let raw_pixels = rgb_img.into_raw();
 
         let tensor = Tensor::from_vec(raw_pixels, (224, 224, 3), &self.device)?
-            .permute((2, 0, 1))? 
+            .permute((2, 0, 1))?
             .to_dtype(candle_core::DType::F32)?
             .affine(1.0 / 255.0, 0.0)?; 
 
         Ok(tensor)
     }
 
-    pub fn predict_action(&self, visual_tensor: &Tensor, instruction: &str) -> Result<Vec<f32>, Box<dyn Error>> {
+    pub fn predict_action(&self, visual_tensor: &Tensor, instruction: &str) -> Result<Vec<f32>, Box<dyn Error + Send + Sync>> {
         let mean = visual_tensor.mean_all()?.to_scalar::<f32>()?;
         
         println!("[VLA Inference] Processing instruction: '{}'", instruction);
@@ -56,13 +58,11 @@ impl VlaModel {
             base64_data
         };
 
-        let image_bytes = general_purpose::STANDARD.decode(b64)
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
+        let image_bytes = general_purpose::STANDARD.decode(b64)?;
             
-        let tensor = self.process_frame(&image_bytes)
-            .map_err(|e| e.to_string())?;
+        let tensor = self.process_frame(&image_bytes)?;
 
-        let mean = tensor.mean_all().map_err(|e| e.to_string())?.to_scalar::<f32>().map_err(|e| e.to_string())?;
+        let mean = tensor.mean_all()?.to_scalar::<f32>()?;
         
         let observation = if mean > 0.6 {
             "Bright environment detected. High luminance."

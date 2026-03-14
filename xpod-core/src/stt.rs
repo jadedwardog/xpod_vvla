@@ -9,7 +9,7 @@ pub struct SttModule {
 }
 
 impl SttModule {
-    pub fn new() -> Result<Self, Box<dyn Error>> {
+    pub fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
         let device = if candle_core::utils::cuda_is_available() {
             Device::new_cuda(0)?
         } else if candle_core::utils::metal_is_available() {
@@ -18,13 +18,15 @@ impl SttModule {
             Device::Cpu
         };
 
-        println!("Initialising STT (Whisper) module on device: {:?}", device);
-        println!("Note: Whisper model loading is deferred. Using energy-based VAD fallback.");
+        println!("[INFO] Initialising STT (Whisper) module on device: {:?}", device);
         
-        Ok(Self { device, model: None })
+        Ok(Self { 
+            device, 
+            model: None 
+        })
     }
 
-    pub fn transcribe_audio(&self, pcm_data: &[f32]) -> Result<String, Box<dyn Error>> {
+    pub fn transcribe_audio(&self, pcm_data: &[f32]) -> Result<String, Box<dyn Error + Send + Sync>> {
         if pcm_data.is_empty() {
             return Ok("Silence".to_string());
         }
@@ -34,9 +36,9 @@ impl SttModule {
         let energy = tensor.sqr()?.mean_all()?.to_scalar::<f32>()?;
         
         if energy > 0.05 {
-            Ok(format!("Auditory Event Detected (Energy: {:.4}) - Pending full Whisper pass.", energy))
+            Ok(format!("Auditory Event Detected (Energy: {:.4})", energy))
         } else {
-            Ok("Background noise / Silence".to_string())
+            Ok("Silence".to_string())
         }
     }
 
@@ -47,8 +49,7 @@ impl SttModule {
             base64_data
         };
 
-        let audio_bytes = general_purpose::STANDARD.decode(b64)
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
+        let audio_bytes = general_purpose::STANDARD.decode(b64)?;
         
         if audio_bytes.is_empty() {
             return Ok("Silence".to_string());
@@ -60,6 +61,6 @@ impl SttModule {
             pcm_f32.push(sample as f32 / 32768.0);
         }
 
-        self.transcribe_audio(&pcm_f32).map_err(|e| e.into())
+        self.transcribe_audio(&pcm_f32)
     }
 }

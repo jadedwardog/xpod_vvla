@@ -4,7 +4,7 @@ use std::env;
 use std::time::Duration;
 use std::path::{Path, PathBuf};
 use axum::{
-    routing::{any, get}, 
+    routing::{any, get, post}, 
     Router, 
     Json, 
     response::{IntoResponse, Response}, 
@@ -22,7 +22,7 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 
 pub mod vla;
 pub mod llm;
@@ -78,6 +78,23 @@ pub struct EpisodicMemory {
     pub event_description: String,
 }
 
+#[derive(Clone, Serialize, Debug)]
+#[serde(tag = "type")]
+pub enum IntentPacket {
+    #[serde(rename = "speak")]
+    Speak { text: String },
+    #[serde(rename = "animate")]
+    Animate { emotion: String },
+    #[serde(rename = "soul_state")]
+    SoulState { arousal: f32, valence: f32, battery: f32 },
+    #[serde(rename = "error")]
+    Error { message: String },
+}
+
+fn default_motor_tx() -> broadcast::Sender<IntentPacket> {
+    broadcast::channel(100).0
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Soul {
     pub identity: Identity,
@@ -85,10 +102,14 @@ pub struct Soul {
     pub memories: Vec<EpisodicMemory>,
     pub active_connection: bool,
     pub battery_level: f32,
+    pub dynamic_rules: Vec<String>,
+    #[serde(skip, default = "default_motor_tx")]
+    pub motor_intent_tx: broadcast::Sender<IntentPacket>,
 }
 
 impl Soul {
     pub fn new(id: String, name: String) -> Self {
+        let (tx, _) = broadcast::channel(100);
         Soul {
             identity: Identity {
                 id,
@@ -102,6 +123,11 @@ impl Soul {
             memories: Vec::new(),
             active_connection: false,
             battery_level: 1.0,
+            dynamic_rules: vec![
+                "Keep responses brief and conversational.".to_string(),
+                "Always acknowledge the sensory environment if relevant.".to_string()
+            ],
+            motor_intent_tx: tx,
         }
     }
 
@@ -145,6 +171,8 @@ pub enum TelemetryPacket {
     Visual { data: String },
     #[serde(rename = "audio")]
     Audio { data: String },
+    #[serde(rename = "text")]
+    Text { data: String },
 }
 
 #[derive(Deserialize)]
@@ -189,91 +217,205 @@ struct TelemetryEvent {
     payload: serde_json::Value,
 }
 
-async fn get_jwt() -> impl IntoResponse {
-    println!("[INFO] xpod Core: UI requested fresh JWT for BLE injection.");
-    let jwt_manager = jwt_auth::JwtManager::new("xpod_super_secret_signing_key");
-    match jwt_manager.generate_vector_token("xpod-user-0001") {
-        Ok(token) => Json(serde_json::json!({ "token": token })).into_response(),
-        Err(e) => {
-            eprintln!("[ERROR] xpod Core: Failed to generate JWT: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+#[derive(Deserialize)]
+pub struct TextPrompt {
+    pub text: String,
+}
+
+async fn trigger_cognition(state: Arc<AppState>, soul_id: String, text: String) {
+    let mut ctx: Option<llm::CognitiveContext> = None;
+    
+    {
+        let mut souls = state.souls.write().await;
+        if let Some(soul) = souls.get_mut(&soul_id) {
+            soul.record_memory(format!("User says: {}", text));
+            
+            ctx = Some(llm::CognitiveContext {
+                soul_name: soul.identity.name.clone(),
+                soul_tendencies: soul.identity.tendencies.clone(),
+                short_term_memory: soul.memories.iter().rev().take(15).map(|m| m.event_description.clone()).collect(),
+                long_term_memory: vec![],
+                recalled_sensory_memories: vec![],
+                current_emotive_state: format!("Arousal: {:.2}, Valence: {:.2}, Battery: {:.0}%", 
+                    soul.emotion.arousal, soul.emotion.valence, soul.battery_level * 100.0),
+                active_rules: soul.dynamic_rules.clone(),
+            });
+        } else {
+            eprintln!("[ERROR] xpod-core: trigger_cognition aborted. Soul '{}' missing from matrix.", soul_id);
+        }
+    }
+
+    if let Some(cognitive_ctx) = ctx {
+        match state.llm_module.generate_cognitive_response(&text, &cognitive_ctx).await {
+            Ok(response) => {
+                let mut souls = state.souls.write().await;
+                if let Some(soul) = souls.get_mut(&soul_id) {
+                    soul.adjust_emotion(response.emotional_shift.arousal, response.emotional_shift.valence);
+                    soul.record_memory(format!("Cognition: [Intent: {}] {}", response.physical_intent, response.spoken_dialogue));
+                    
+                    let speak_intent = IntentPacket::Speak { text: response.spoken_dialogue };
+                    let state_intent = IntentPacket::SoulState { 
+                        arousal: soul.emotion.arousal, 
+                        valence: soul.emotion.valence,
+                        battery: soul.battery_level
+                    };
+                    
+                    if let Err(e) = soul.motor_intent_tx.send(speak_intent) {
+                        eprintln!("[WARN] xpod-core: Dropped speak_intent due to closed motor channel: {}", e);
+                    }
+                    if let Err(e) = soul.motor_intent_tx.send(state_intent) {
+                        eprintln!("[WARN] xpod-core: Dropped state_intent due to closed motor channel: {}", e);
+                    }
+                } else {
+                    eprintln!("[ERROR] xpod-core: Soul '{}' vanished before cognition could be applied.", soul_id);
+                }
+            },
+            Err(e) => {
+                let error_msg = format!("Cognitive pipeline failure: {}", e);
+                eprintln!("[LLM ERROR] {}", error_msg);
+                let mut souls = state.souls.write().await;
+                if let Some(soul) = souls.get_mut(&soul_id) {
+                    if let Err(e) = soul.motor_intent_tx.send(IntentPacket::Error { message: error_msg }) {
+                        eprintln!("[WARN] xpod-core: Failed to propagate error intent: {}", e);
+                    }
+                }
+            }
         }
     }
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
+async fn handle_web_text(
+    AxumPath(soul_id): AxumPath<String>,
     State(state): State<Arc<AppState>>,
+    Json(payload): Json<TextPrompt>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_sidecar_socket(socket, state))
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        trigger_cognition(state_clone, soul_id, payload.text).await;
+    });
+    StatusCode::ACCEPTED
 }
 
-async fn handle_sidecar_socket(mut socket: WebSocket, state: Arc<AppState>) {
-    let soul_id = "virtual-explorer-01".to_string(); 
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    AxumPath(soul_id): AxumPath<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_sidecar_socket(socket, state, soul_id))
+}
 
-    {
+async fn handle_sidecar_socket(mut socket: WebSocket, state: Arc<AppState>, soul_id: String) {
+    let mut motor_rx = {
         let mut souls = state.souls.write().await;
         if let Some(soul) = souls.get_mut(&soul_id) {
             soul.active_connection = true;
             soul.record_memory("Embodiment sidecar connected.".to_string());
             println!("[xpod-core] Soul {} possessed by sidecar.", soul_id);
+            soul.motor_intent_tx.subscribe()
+        } else {
+            println!("[xpod-core] Provisioning new Soul context for {}.", soul_id);
+            let mut new_soul = Soul::new(soul_id.clone(), format!("Agent {}", soul_id));
+            new_soul.active_connection = true;
+            new_soul.record_memory("Embodiment sidecar connected. Initiated new soul matrix.".to_string());
+            let rx = new_soul.motor_intent_tx.subscribe();
+            souls.insert(soul_id.clone(), new_soul);
+            rx
         }
-    }
+    };
 
-    while let Some(msg) = socket.recv().await {
-        if let Ok(Message::Text(text)) = msg {
-            match serde_json::from_str::<TelemetryPacket>(&text) {
-                Ok(TelemetryPacket::Proprioception { battery }) => {
-                    let mut souls = state.souls.write().await;
-                    if let Some(soul) = souls.get_mut(&soul_id) {
-                        soul.battery_level = battery;
-                        if battery < 0.2 {
-                            soul.adjust_emotion(0.1, -0.05); 
+    loop {
+        tokio::select! {
+            msg = socket.recv() => {
+                let Some(msg) = msg else { 
+                    eprintln!("[WARN] xpod-core: WebSocket recv() returned None. Socket closed for soul {}.", soul_id);
+                    break; 
+                }; 
+                
+                let text = match msg {
+                    Ok(Message::Text(t)) => t,
+                    Ok(other) => {
+                        eprintln!("[DEBUG] xpod-core: Ignored non-text WebSocket message for soul {}: {:?}", soul_id, other);
+                        continue;
+                    }
+                    Err(e) => {
+                        eprintln!("[ERROR] xpod-core: WebSocket read error for soul {}: {}", soul_id, e);
+                        break;
+                    }
+                };
+
+                let packet = match serde_json::from_str::<TelemetryPacket>(&text) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("[ERROR] xpod-core: Failed to parse TelemetryPacket for soul {}. Error: {}. Payload: {}", soul_id, e, text);
+                        continue;
+                    }
+                };
+
+                match packet {
+                    TelemetryPacket::Proprioception { battery } => {
+                        let mut souls = state.souls.write().await;
+                        if let Some(soul) = souls.get_mut(&soul_id) {
+                            soul.battery_level = battery;
+                            if battery < 0.2 {
+                                soul.adjust_emotion(0.01, -0.01); 
+                            }
+                            let update = IntentPacket::SoulState { 
+                                arousal: soul.emotion.arousal, 
+                                valence: soul.emotion.valence,
+                                battery: soul.battery_level
+                            };
+                            let _ = soul.motor_intent_tx.send(update);
                         }
                     }
-                }
-                Ok(TelemetryPacket::Visual { data }) => {
-                    match state.vla_module.analyze_base64_frame(&data) {
-                        Ok(observation) => {
+                    TelemetryPacket::Visual { data } => {
+                        if let Ok(observation) = state.vla_module.analyze_base64_frame(&data) {
                             let mut souls = state.souls.write().await;
                             if let Some(soul) = souls.get_mut(&soul_id) {
                                 soul.record_memory(format!("Vision: {}", observation));
-                                soul.adjust_emotion(0.01, 0.0);
+                                soul.adjust_emotion(0.005, 0.0);
                             }
-                        },
-                        Err(e) => eprintln!("[VLA ERROR] Failed to process visual frame: {}", e),
+                        }
+                    }
+                    TelemetryPacket::Audio { data } => {
+                        match state.stt_module.process_base64_audio(&data) {
+                            Ok(transcript) if transcript != "Silence" && !transcript.contains("Background noise") => {
+                                let mut souls = state.souls.write().await;
+                                if let Some(soul) = souls.get_mut(&soul_id) {
+                                    soul.adjust_emotion(0.02, 0.0);
+                                    println!("[PERCEPTION] {} detected acoustic energy.", soul_id);
+                                }
+                            },
+                            Ok(_) => {},
+                            Err(e) => eprintln!("[STT ERROR] {}", e),
+                        }
+                    }
+                    TelemetryPacket::Text { data } => {
+                        let state_clone = state.clone();
+                        let sid = soul_id.clone();
+                        tokio::spawn(async move {
+                            trigger_cognition(state_clone, sid, data).await;
+                        });
                     }
                 }
-                Ok(TelemetryPacket::Audio { data }) => {
-                    match state.stt_module.process_base64_audio(&data) {
-                        Ok(transcript) => {
-                            if transcript != "Silence" && !transcript.contains("Background noise") {
-                                {
-                                    let mut souls = state.souls.write().await;
-                                    if let Some(soul) = souls.get_mut(&soul_id) {
-                                        soul.record_memory(format!("Auditory: {}", transcript));
-                                        soul.adjust_emotion(0.05, 0.0);
-                                        println!("[STT] {} heard: {}", soul_id, transcript);
-                                    }
-                                }
-                                
-                                match state.llm_module.generate_response(&transcript).await {
-                                    Ok(response) => {
-                                        let mut souls = state.souls.write().await;
-                                        if let Some(soul) = souls.get_mut(&soul_id) {
-                                            soul.record_memory(format!("Cognition: {}", response));
-                                            println!("[LLM] {} thought: {}", soul_id, response);
-                                        }
-                                    },
-                                    Err(e) => eprintln!("[LLM ERROR] Failed to generate cognitive response: {}", e),
+            }
+            intent_res = motor_rx.recv() => {
+                match intent_res {
+                    Ok(intent) => {
+                        match serde_json::to_string(&intent) {
+                            Ok(json) => {
+                                if let Err(e) = socket.send(Message::Text(json)).await {
+                                    eprintln!("[ERROR] xpod-core: Failed to send intent to sidecar for soul {}: {}", soul_id, e);
+                                    break; 
                                 }
                             }
-                        },
-                        Err(e) => eprintln!("[STT ERROR] Failed to process audio buffer: {}", e),
+                            Err(e) => {
+                                eprintln!("[ERROR] xpod-core: Failed to serialize IntentPacket for soul {}: {}", soul_id, e);
+                            }
+                        }
                     }
-                }
-                Err(e) => {
-                    eprintln!("[WARN] xpod Core: Telemetry decode error: {}", e);
+                    Err(e) => {
+                        eprintln!("[WARN] xpod-core: Motor broadcast channel lagged/dropped for soul {}: {}", soul_id, e);
+                    }
                 }
             }
         }
@@ -283,7 +425,19 @@ async fn handle_sidecar_socket(mut socket: WebSocket, state: Arc<AppState>) {
     if let Some(soul) = souls.get_mut(&soul_id) {
         soul.active_connection = false;
         soul.record_memory("Embodiment sidecar disconnected.".to_string());
-        println!("[xpod-core] Soul {} embodiment severed.", soul_id);
+        println!("[xpod-core] Soul {} released sidecar.", soul_id);
+    }
+}
+
+async fn get_jwt() -> impl IntoResponse {
+    println!("[INFO] xpod Core: UI requested fresh JWT for BLE injection.");
+    let jwt_manager = jwt_auth::JwtManager::new("xpod_super_secret_signing_key");
+    match jwt_manager.generate_vector_token("xpod-user-0001") {
+        Ok(token) => Json(serde_json::json!({ "token": token })).into_response(),
+        Err(e) => {
+            eprintln!("[ERROR] xpod Core: Failed to generate JWT: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
     }
 }
 
@@ -489,44 +643,18 @@ async fn handle_telemetry(Json(event): Json<TelemetryEvent>) -> impl IntoRespons
     StatusCode::OK
 }
 
-fn ensure_certificates_exist(cert_path: &Path, key_path: &Path, host: &str) -> Result<(), Box<dyn Error>> {
-    let ca_path = PathBuf::from("robot-ca.pem");
-    let cert_version_file = PathBuf::from("cert_version_v11_ecdsa_ca.txt");
-    
-    if cert_path.exists() && key_path.exists() && ca_path.exists() && cert_version_file.exists() {
-        return Ok(());
-    }
-    
-    println!("[INFO] xpod Core: >>> GENERATING STRICT CA-SIGNED ECDSA TLS CERTIFICATES <<<");
+async fn handle_shutdown() -> impl IntoResponse {
+    println!("[CRITICAL] xpod Core: Remote shutdown initiated. Terminating sidecars and core...");
+    let _ = std::process::Command::new("pkill")
+        .arg("-f")
+        .arg("xpod-vector")
+        .output();
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        std::process::exit(0);
+    });
 
-    let mut ca_params = rcgen::CertificateParams::new(vec!["xPod Root CA".to_string()]);
-    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    ca_params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;
-    let ca_cert = rcgen::Certificate::from_params(ca_params)?;
-
-    let subject_alt_names = vec![
-        "accounts.anki.com".to_string(),
-        host.to_string(), 
-        "localhost".to_string(),
-        "session-certs.token.anki.com".to_string(),
-        "chipper.anki.com".to_string(),
-        "ota.anki.com".to_string()
-    ];
-    
-    let mut leaf_params = rcgen::CertificateParams::new(subject_alt_names);
-    leaf_params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;
-    let mut dn = rcgen::DistinguishedName::new();
-    dn.push(rcgen::DnType::CommonName, "accounts.anki.com");
-    leaf_params.distinguished_name = dn;
-    
-    let leaf_cert = rcgen::Certificate::from_params(leaf_params)?;
-    
-    fs::write(cert_path, leaf_cert.serialize_pem_with_signer(&ca_cert)?)?;
-    fs::write(key_path, leaf_cert.serialize_private_key_pem())?;
-    fs::write(&ca_path, ca_cert.serialize_pem()?)?;
-    fs::write(&cert_version_file, "v11 ECDSA active")?;
-    
-    Ok(())
+    StatusCode::OK
 }
 
 async fn proxy_to_sidecar(AxumPath(path): AxumPath<String>, req: Request<Body>) -> Response {
@@ -540,9 +668,8 @@ async fn proxy_to_sidecar(AxumPath(path): AxumPath<String>, req: Request<Body>) 
     let client = Client::new();
     let method = req.method().clone();
     let headers = req.headers().clone();
-    let body = req.into_body();
     
-    let reqwest_body = reqwest::Body::wrap_stream(axum::body::Body::into_data_stream(body));
+    let reqwest_body = reqwest::Body::wrap_stream(axum::body::Body::into_data_stream(req.into_body()));
     let mut request_builder = client.request(method, &uri).body(reqwest_body);
 
     for (k, v) in headers.iter() {
@@ -583,17 +710,70 @@ async fn proxy_to_sidecar(AxumPath(path): AxumPath<String>, req: Request<Body>) 
     }
 }
 
-async fn check_sidecar_health(uri: &str) -> bool {
+fn ensure_certificates_exist(cert_path: &Path, key_path: &Path, host: &str) -> Result<(), Box<dyn Error>> {
+    let ca_path = PathBuf::from("robot-ca.pem");
+    let cert_version_file = PathBuf::from("cert_version_v11_ecdsa_ca.txt");
+    
+    if cert_path.exists() && key_path.exists() && ca_path.exists() && cert_version_file.exists() {
+        return Ok(());
+    }
+    
+    println!("[INFO] xpod Core: >>> GENERATING STRICT CA-SIGNED ECDSA TLS CERTIFICATES <<<");
+
+    let mut ca_params = rcgen::CertificateParams::new(vec!["xPod Root CA".to_string()]);
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;
+    let ca_cert = rcgen::Certificate::from_params(ca_params)?;
+
+    let subject_alt_names = vec![
+        "accounts.anki.com".to_string(),
+        host.to_string(), 
+        "localhost".to_string(),
+        "session-certs.token.anki.com".to_string(),
+        "chipper.anki.com".to_string(),
+        "ota.anki.com".to_string()
+    ];
+    
+    let mut leaf_params = rcgen::CertificateParams::new(subject_alt_names);
+    leaf_params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;
+    let mut dn = rcgen::DistinguishedName::new();
+    dn.push(rcgen::DnType::CommonName, "accounts.anki.com");
+    leaf_params.distinguished_name = dn;
+    
+    let leaf_cert = rcgen::Certificate::from_params(leaf_params)?;
+    
+    fs::write(cert_path, leaf_cert.serialize_pem_with_signer(&ca_cert)?)?;
+    fs::write(key_path, leaf_cert.serialize_private_key_pem())?;
+    fs::write(&ca_path, ca_cert.serialize_pem()?)?;
+    fs::write(&cert_version_file, "v11 ECDSA active")?;
+    
+    Ok(())
+}
+
+async fn check_sidecar_health(uri: &str, child: &mut tokio::process::Child) -> bool {
     let client = Client::builder().timeout(Duration::from_secs(1)).build().unwrap_or_default();
-    for _ in 1..=10 {
-        if let Ok(resp) = client.get(uri).send().await {
-            if resp.status().is_success() {
-                println!("[INFO] xpod Core: Sidecar health check passed.");
-                return true;
+    for i in 1..=15 {
+        if let Ok(Some(status)) = child.try_wait() {
+            eprintln!("[FATAL] xpod Core: Sidecar process crashed prematurely with status: {}", status);
+            return false;
+        }
+
+        match client.get(uri).send().await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    println!("[INFO] xpod Core: Sidecar health check passed.");
+                    return true;
+                } else {
+                    println!("[WARN] xpod Core: Sidecar health check returned non-success status: {}", resp.status());
+                }
+            }
+            Err(e) => {
+                println!("[DEBUG] xpod Core: Waiting for sidecar on {} (Attempt {}/15): {}", uri, i, e);
             }
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+    eprintln!("[FATAL] xpod Core: Sidecar health check timed out after 15 seconds.");
     false
 }
 
@@ -608,41 +788,43 @@ async fn run_server(ui_path: PathBuf) {
     ensure_certificates_exist(&cert_path, &key_path, &host).expect("Cert generation failed");
 
     let config = RustlsConfig::from_pem_file(&cert_path, &key_path).await.expect("Failed to load TLS");
-
     let mut initial_souls = HashMap::new();
     let default_soul = Soul::new(
         "virtual-explorer-01".to_string(),
         "Virtual Navigator".to_string(),
     );
     initial_souls.insert(default_soul.identity.id.clone(), default_soul);
-
     println!("[INFO] xpod Core: Verifying local AI models (GGUF / Safetensors)...");
     
     let models_dir = env::current_dir().unwrap_or_default().join("models");
     let local_tokenizer = models_dir.join("tokenizer.json");
-    let local_weights = models_dir.join("Phi-3-mini-4k-instruct-q4.gguf");
+    let local_weights = models_dir.join("tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf");
 
     let (tokenizer_path, llm_weights_path) = if local_tokenizer.exists() && local_weights.exists() {
         println!("[INFO] xpod Core: Found packaged models in local ./models/ directory. Operating strictly offline.");
         (local_tokenizer, local_weights)
     } else {
         println!("[WARN] xpod Core: Packaged models not found in ./models/. Falling back to HuggingFace Hub resolution...");
-        tokio::task::spawn_blocking(move || {
-            let api = hf_hub::api::sync::ApiBuilder::new().build().expect("Failed to init HF API");
-            
-            println!("[INFO] HF-Hub: Resolving microsoft/Phi-3-mini-4k-instruct-gguf...");
-            let repo = api.repo(hf_hub::Repo::with_revision(
-                "microsoft/Phi-3-mini-4k-instruct-gguf".to_string(),
-                hf_hub::RepoType::Model,
-                "main".to_string(),
-            ));
-            
-            let tok = repo.get("tokenizer.json").expect("Failed to resolve tokenizer.json");
-            let weights = repo.get("Phi-3-mini-4k-instruct-q4.gguf").expect("Failed to resolve GGUF weights");
-            
-            println!("[INFO] HF-Hub: Models verified at {:?}", weights.parent().unwrap());
-            (tok, weights)
-        }).await.expect("Model resolution task panicked")
+        
+        let api = hf_hub::api::tokio::ApiBuilder::new().build().expect("Failed to init HF API");
+        
+        println!("[INFO] HF-Hub: Resolving model weights and tokenizer...");
+        let base_repo = api.repo(hf_hub::Repo::with_revision(
+            "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
+            hf_hub::RepoType::Model,
+            "main".to_string(),
+        ));
+        let gguf_repo = api.repo(hf_hub::Repo::with_revision(
+            "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF".to_string(),
+            hf_hub::RepoType::Model,
+            "main".to_string(),
+        ));
+        
+        let tok = base_repo.get("tokenizer.json").await.expect("Failed to resolve tokenizer.json");
+        let weights = gguf_repo.get("tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf").await.expect("Failed to resolve GGUF weights");
+        
+        println!("[INFO] HF-Hub: Models verified at {:?}", weights.parent().unwrap());
+        (tok, weights)
     };
 
     println!("[INFO] xpod Core: Bootstrapping Neural Pipelines...");
@@ -672,12 +854,12 @@ async fn run_server(ui_path: PathBuf) {
     });
 
     let app = Router::new()
+        .route("/api/core/telemetry", any(handle_telemetry))
+        .route("/api/core/shutdown", any(handle_shutdown))
+        .route("/api/core/text/:soul_id", post(handle_web_text))
+        .route("/v1/soul-possess/:soul_id", get(ws_handler))
         .route("/api/core/get_jwt", get(get_jwt))
         .route("/api/core/provision_bot", any(handle_provision))
-        .route("/api/core/telemetry", any(handle_telemetry))
-        .route("/v1/soul-possess", get(ws_handler))
-        .route("/api/robot/*path", any(proxy_to_sidecar))
-        .route("/api/vector/*path", any(proxy_to_sidecar))
         .route("/1/sessions", any(handle_sessions))
         .route("/v1/sessions", any(handle_sessions))
         .route("/1/users/me", any(handle_users_me))
@@ -692,6 +874,8 @@ async fn run_server(ui_path: PathBuf) {
         .route("/v1/update/firmware_list", any(handle_firmware_list))
         .route("/1/app_settings", any(handle_app_settings))
         .route("/v1/app_settings", any(handle_app_settings))
+        .route("/api/robot/*path", any(proxy_to_sidecar))
+        .route("/api/vector/*path", any(proxy_to_sidecar))
         .fallback_service(ServeDir::new(ui_path))
         .with_state(shared_state);
         
@@ -723,6 +907,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let binary_name = "xpod-vector";
     let sidecar_path = find_sidecar_binary(binary_name).expect("Could not locate sidecar binary");
     
+    println!("[INFO] xpod Core: Ensuring port environment is clear...");
+    let _ = std::process::Command::new("pkill")
+        .arg("-f")
+        .arg(binary_name)
+        .output();
+    
     let vector_ip = env::var("VECTOR_IP").unwrap_or_default();
     let cert_path = env::var("VECTOR_CERT_PATH").unwrap_or_else(|_| "vector-cert.pem".to_string());
     let server_port = env::var("SERVER_PORT").unwrap_or_else(|_| "30301".to_string());
@@ -732,12 +922,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .env("VECTOR_IP", &vector_ip)
         .env("VECTOR_CERT_PATH", &cert_path)
         .env("SIDECAR_PORT", &sidecar_port)
+        .kill_on_drop(true)
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .spawn()?;
 
     let health_url = format!("http://127.0.0.1:{}/ble/init", sidecar_port);
-    if !check_sidecar_health(&health_url).await {
+    println!("[INFO] xpod Core: Awaiting sidecar readiness at {}...", health_url);
+
+    if !check_sidecar_health(&health_url, &mut sidecar_process).await {
+        eprintln!("[FATAL] xpod Core: Failed to establish healthy connection to sidecar. Exiting.");
         let _ = sidecar_process.kill().await;
         std::process::exit(1);
     }

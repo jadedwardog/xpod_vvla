@@ -81,8 +81,14 @@ document.addEventListener("DOMContentLoaded", () => {
     const setupContainer = document.getElementById('dynamic-setup-container');
     const eyesDisplay = document.getElementById('eyes-display');
     const bottomTitle = document.querySelector('.bottom-status .title');
+    let currentActiveModule = null;
 
     const renderPanel = async (targetId) => {
+        if (currentActiveModule && typeof currentActiveModule.shutdown === 'function') {
+            currentActiveModule.shutdown();
+        }
+        currentActiveModule = null;
+
         setupContainer.style.display = 'block';
         setupContainer.innerHTML = '';
         eyesDisplay.style.opacity = '0.1';
@@ -94,8 +100,28 @@ document.addEventListener("DOMContentLoaded", () => {
                 <p>STATUS: <span style="color:#00ff00; text-shadow:0 0 10px #00ff00;">ONLINE</span></p>
                 <p>PORT: 30301</p>
                 <p>UPTIME: <span id="uptime-counter">00:00:00</span></p>
-                <button class="neon-btn" style="margin-top: 20px;" onclick="document.getElementById('dynamic-setup-container').style.display='none'; document.getElementById('eyes-display').style.opacity='1'; document.querySelector('.bottom-status .title').innerText='DASHBOARD';">CLOSE MENU</button>
+                <div style="margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
+                    <button class="neon-btn" onclick="document.getElementById('dynamic-setup-container').style.display='none'; document.getElementById('eyes-display').style.opacity='1'; document.querySelector('.bottom-status .title').innerText='DASHBOARD';">CLOSE MENU</button>
+                    <button id="shutdown-server-btn" class="neon-btn" style="border-color: #ff003c; color: #ff003c;">SHUTDOWN CORE SERVER</button>
+                </div>
             `;
+
+            document.getElementById('shutdown-server-btn').addEventListener('click', async () => {
+                const confirmed = confirm("WARNING: Are you sure you want to terminate the xpod core server? This will drop all AI cognition state and kill all sidecar processes.");
+                if (confirmed) {
+                    try {
+                        window.appLogger.log('CRITICAL', 'SYSTEM', 'User triggered remote server shutdown sequence. Halting sidecars...');
+                        if (currentActiveModule && typeof currentActiveModule.shutdown === 'function') {
+                            currentActiveModule.shutdown();
+                        }
+                        window.appLogger.log('CRITICAL', 'SYSTEM', 'Transmitting SIGKILL to core server...');
+                        await fetch('/api/core/shutdown', { method: 'POST' });
+                        document.body.innerHTML = '<div style="display:flex; height:100vh; width:100vw; justify-content:center; align-items:center; background:#000; color:#ff003c; font-family:monospace; font-size:2rem; text-shadow:0 0 10px #ff003c;">[ CORE SERVER & SIDECARS OFFLINE ]</div>';
+                    } catch (e) {
+                        window.appLogger.log('ERROR', 'SYSTEM', `Shutdown payload failed: ${e.message}`);
+                    }
+                }
+            });
         } 
         else if (targetId === 'bot-settings') {
             bottomTitle.innerText = 'ACTIVE DEVICES';
@@ -122,11 +148,25 @@ document.addEventListener("DOMContentLoaded", () => {
                 const platform = document.getElementById('platform-selector').value;
                 if (platform === 'vector' && window.VectorSetup) {
                     const vectorSetup = new window.VectorSetup();
+                    currentActiveModule = vectorSetup;
                     await vectorSetup.renderUI(setupContainer);
                 } else {
                     setupContainer.innerHTML = `<p style="color:#ff003c;">ERR: Module missing or platform unsupported.</p>`;
                 }
             });
+        }
+        else if (targetId === 'virtual-sidecar') {
+            bottomTitle.innerText = 'VIRTUAL SIDECAR';
+            if (window.VirtualSidecar) {
+                const virtualSidecar = new window.VirtualSidecar();
+                currentActiveModule = virtualSidecar;
+                await virtualSidecar.renderUI(setupContainer);
+            } else {
+                setupContainer.innerHTML = `
+                    <h2 style="margin-top:0; border-bottom:1px solid rgba(0,255,0,0.3); padding-bottom:10px;">VIRTUAL SIDECAR</h2>
+                    <p style="color:#ff003c;">ERR: VirtualSidecar script failed to load. Check console.</p>
+                `;
+            }
         }
         else if (targetId === 'logs') {
             bottomTitle.innerText = 'SYSTEM LOG';
