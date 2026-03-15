@@ -118,7 +118,7 @@ impl Soul {
             },
             emotion: EmotionalState {
                 arousal: 0.2,
-                valence: 0.5,
+                 valence: 0.5,
             },
             memories: Vec::new(),
             active_connection: false,
@@ -777,7 +777,9 @@ async fn check_sidecar_health(uri: &str, child: &mut tokio::process::Child) -> b
     false
 }
 
-async fn run_server(ui_path: PathBuf) {
+type PromptConfigMap = HashMap<String, llm::PromptTemplates>;
+
+async fn run_server(ui_path: PathBuf, core_dir: PathBuf) {
     let port = env::var("SERVER_PORT").unwrap_or_else(|_| "30301".to_string());
     let host = env::var("SERVER_HOST").unwrap_or_else(|_| "localhost".to_string());
     let addr: std::net::SocketAddr = format!("0.0.0.0:{}", port).parse().expect("Invalid address");
@@ -796,15 +798,15 @@ async fn run_server(ui_path: PathBuf) {
     initial_souls.insert(default_soul.identity.id.clone(), default_soul);
     println!("[INFO] xpod Core: Verifying local AI models (GGUF / Safetensors)...");
     
-    let models_dir = env::current_dir().unwrap_or_default().join("models");
+    let models_dir = core_dir.join("models");
     let local_tokenizer = models_dir.join("tokenizer.json");
     let local_weights = models_dir.join("tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf");
 
     let (tokenizer_path, llm_weights_path) = if local_tokenizer.exists() && local_weights.exists() {
-        println!("[INFO] xpod Core: Found packaged models in local ./models/ directory. Operating strictly offline.");
+        println!("[INFO] xpod Core: Found packaged models in local {:?} directory. Operating strictly offline.", models_dir);
         (local_tokenizer, local_weights)
     } else {
-        println!("[WARN] xpod Core: Packaged models not found in ./models/. Falling back to HuggingFace Hub resolution...");
+        println!("[WARN] xpod Core: Packaged models not found in {:?}. Falling back to HuggingFace Hub resolution...", models_dir);
         
         let api = hf_hub::api::tokio::ApiBuilder::new().build().expect("Failed to init HF API");
         
@@ -838,13 +840,85 @@ async fn run_server(ui_path: PathBuf) {
         std::process::exit(1);
     }));
     
-    let llm_module = Arc::new(llm::LlmModule::new(
+    let mut cognitive_core = llm::LlmModule::new(
         tokenizer_path.to_str().unwrap(),
         llm_weights_path.to_str().unwrap()
     ).unwrap_or_else(|e| {
         eprintln!("Failed to init LLM pipeline: {}", e);
         std::process::exit(1);
-    }));
+    });
+
+    println!("[INFO] xpod Core: Establishing Agentic Split-Brain Architecture...");
+    
+    let resolved_repo = match cognitive_core.load_conversational_model_with_fallback(
+        "QuantFactory/Meta-Llama-3-8B-Instruct-GGUF",
+        "Meta-Llama-3-8B-Instruct.Q4_K_M.gguf",
+        "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+        "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+    ).await {
+        Ok(repo) => repo,
+        Err(e) => {
+            eprintln!("[FATAL] Could not resolve conversational LLM fallback protocol: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let prompts_file_path = core_dir.join("prompts.json");
+
+    let config_map: PromptConfigMap = if prompts_file_path.exists() {
+        println!("[INFO] xpod Core: Loading prompt templates map from {:?}...", prompts_file_path);
+        match fs::read_to_string(&prompts_file_path) {
+            Ok(contents) => {
+                match serde_json::from_str::<PromptConfigMap>(&contents) {
+                    Ok(parsed) => parsed,
+                    Err(e) => {
+                        eprintln!("[WARN] xpod Core: Failed to parse prompts.json as a dictionary ({}). Generating new defaults.", e);
+                        let mut map = HashMap::new();
+                        map.insert("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF".to_string(), llm::PromptTemplates::default());
+                        map
+                    }
+                }
+            },
+            Err(e) => {
+                eprintln!("[WARN] xpod Core: Failed to read prompts.json ({}). Using defaults.", e);
+                let mut map = HashMap::new();
+                map.insert("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF".to_string(), llm::PromptTemplates::default());
+                map
+            }
+        }
+    } else {
+        println!("[INFO] xpod Core: prompts.json not found. Generating multi-model template dictionary at {:?}...", prompts_file_path);
+        
+        let mut map = HashMap::new();
+        map.insert("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF".to_string(), llm::PromptTemplates::default());
+        
+        let mut llama3_tmpl = llm::PromptTemplates::default();
+        llama3_tmpl.system_prefix = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n".to_string();
+        llama3_tmpl.system_suffix = "<|eot_id|>".to_string();
+        llama3_tmpl.user_prefix = "<|start_header_id|>user<|end_header_id|>\n\n".to_string();
+        llama3_tmpl.user_suffix = "<|eot_id|>".to_string();
+        llama3_tmpl.assistant_prefix = "<|start_header_id|>assistant<|end_header_id|>\n\n".to_string();
+        llama3_tmpl.eos_tokens = vec!["<|eot_id|>".to_string(), "<|end_of_text|>".to_string()];
+        map.insert("QuantFactory/Meta-Llama-3-8B-Instruct-GGUF".to_string(), llama3_tmpl);
+
+        if let Ok(json) = serde_json::to_string_pretty(&map) {
+            if let Err(e) = fs::write(&prompts_file_path, json) {
+                eprintln!("[WARN] xpod Core: Failed to write default prompts.json: {}", e);
+            }
+        }
+        map
+    };
+
+    let selected_template = config_map.get(&resolved_repo)
+        .cloned()
+        .unwrap_or_else(|| {
+            println!("[WARN] xpod Core: No template found for repo '{}'. Falling back to default TinyLlama formatting.", resolved_repo);
+            llm::PromptTemplates::default()
+        });
+
+    cognitive_core.set_prompt_templates(selected_template);
+
+    let llm_module = Arc::new(cognitive_core);
 
     let shared_state = Arc::new(AppState {
         souls: RwLock::new(initial_souls),
@@ -901,8 +975,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     dotenvy::dotenv().ok();
     
     let cwd = env::current_dir()?;
-    let mut web_ui_path = cwd.join("web_ui");
-    if !web_ui_path.exists() { web_ui_path = cwd.join("xpod-core").join("web_ui"); }
+    let core_dir = if cwd.join("xpod-core").exists() {
+        cwd.join("xpod-core")
+    } else {
+        cwd.clone()
+    };
+    
+    let mut web_ui_path = core_dir.join("web_ui");
+    if !web_ui_path.exists() { web_ui_path = cwd.join("web_ui"); }
 
     let binary_name = "xpod-vector";
     let sidecar_path = find_sidecar_binary(binary_name).expect("Could not locate sidecar binary");
@@ -937,7 +1017,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let ui_task_path = web_ui_path.clone();
-    tokio::spawn(async move { run_server(ui_task_path).await; });
+    let core_dir_clone = core_dir.clone();
+    
+    tokio::spawn(async move { run_server(ui_task_path, core_dir_clone).await; });
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => { let _ = sidecar_process.kill().await; }

@@ -1,0 +1,33 @@
+{
+  "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF": {
+    "router_system": "Classify the user input into exactly one of these two categories:\n1. CHAT (for greetings, casual conversation, questions)\n2. EMBODIED (for requests to move, look, perform physical actions, or strong emotions)\nOutput ONLY the word CHAT or EMBODIED.",
+    "persona_system": "You are {soul_name}. You are {tendencies}. Directives: {rules}. Recent memory: {memory}. Reply directly to the user in a single, short conversational sentence.",
+    "somatic_system": "Analyze the dialogue and output the physical intent and emotional shift of the Assistant. You MUST output EXACTLY this JSON format and nothing else:\n{\n  \"physical_intent\": \"description of physical action\",\n  \"target_vector\": [0.0, 0.0, 0.0],\n  \"emotional_shift\": {\n    \"valence\": 0.1,\n    \"arousal\": 0.1,\n    \"dominance\": 0.1\n  }\n}",
+    "somatic_user": "User: \"{user_prompt}\"\nAssistant: \"{dialogue}\"\n\nOutput the JSON object:",
+    "system_prefix": "<|system|>\n",
+    "system_suffix": "</s>\n",
+    "user_prefix": "<|user|>\n",
+    "user_suffix": "</s>\n",
+    "assistant_prefix": "<|assistant|>\n",
+    "eos_tokens": [
+      "</s>",
+      "<|end|>",
+      "<|endoftext|>"
+    ]
+  },
+  "QuantFactory/Meta-Llama-3-8B-Instruct-GGUF": {
+    "router_system": "Classify the user input into exactly one of these two categories:\n1. CHAT (for greetings, casual conversation, questions)\n2. EMBODIED (for requests to move, look, perform physical actions, or strong emotions)\nOutput ONLY the word CHAT or EMBODIED.",
+    "persona_system": "You are {soul_name}. You are {tendencies}. Directives: {rules}. Recent memory: {memory}. Reply directly to the user in a single, short conversational sentence.",
+    "somatic_system": "Analyze the dialogue and output the physical intent and emotional shift of the Assistant. You MUST output EXACTLY this JSON format and nothing else:\n{\n  \"physical_intent\": \"description of physical action\",\n  \"target_vector\": [0.0, 0.0, 0.0],\n  \"emotional_shift\": {\n    \"valence\": 0.1,\n    \"arousal\": 0.1,\n    \"dominance\": 0.1\n  }\n}",
+    "somatic_user": "User: \"{user_prompt}\"\nAssistant: \"{dialogue}\"\n\nOutput the JSON object:",
+    "system_prefix": "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n",
+    "system_suffix": "<|eot_id|>",
+    "user_prefix": "<|start_header_id|>user<|end_header_id|>\n\n",
+    "user_suffix": "<|eot_id|>",
+    "assistant_prefix": "<|start_header_id|>assistant<|end_header_id|>\n\n",
+    "eos_tokens": [
+      "<|eot_id|>",
+      "<|end_of_text|>"
+    ]
+  }
+}

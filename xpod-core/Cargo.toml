@@ -29,3 +29,9 @@ candle-transformers = "0.8.2"
 tokenizers = "0.19.1"
 image = "0.24.7"
 hf-hub = { version = "0.4.1", default-features = false, features = ["rustls-tls", "tokio"] }
+
+[features]
+mkl = ["candle-core/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
+accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "candle-transformers/accelerate"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
