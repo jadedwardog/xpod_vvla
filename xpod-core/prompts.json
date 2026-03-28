@@ -29,5 +29,17 @@
       "<|eot_id|>",
       "<|end_of_text|>"
     ]
+  },
+  "TheBloke/Mistral-7B-Instruct-v0.2-GGUF": {
+    "router_system": "Classify the input. Output ONLY one word: CHAT or EMBODIED.",
+    "persona_system": "IMPORTANT: You are NOT an assistant. You are {soul_name}, an AI with a distinct personality.\nPersonality traits: {tendencies}\nRules you must follow: {rules}\nRecent memory: {memory}\nDo NOT offer help. Do NOT say you are an assistant. Respond as {soul_name} in ONE short sentence only.",
+    "somatic_system": "Analyze the dialogue and output the physical intent and emotional shift of the Assistant. You MUST output EXACTLY this JSON format and nothing else:\n{\n  \"physical_intent\": \"description of physical action\",\n  \"target_vector\": [0.0, 0.0, 0.0],\n  \"emotional_shift\": {\n    \"valence\": 0.1,\n    \"arousal\": 0.1,\n    \"dominance\": 0.1\n  }\n}",
+    "somatic_user": "User: \"{user_prompt}\"\nAssistant: \"{dialogue}\"\n\nOutput the JSON object:",
+    "system_prefix": "[INST] ",
+    "system_suffix": " ",
+    "user_prefix": "",
+    "user_suffix": " [/INST]",
+    "assistant_prefix": "",
+    "eos_tokens": ["</s>", "[INST]", "[/INST]"]
   }
 }

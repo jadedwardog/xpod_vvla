@@ -233,7 +233,7 @@ async fn trigger_cognition(state: Arc<AppState>, soul_id: String, text: String) 
             ctx = Some(llm::CognitiveContext {
                 soul_name: soul.identity.name.clone(),
                 soul_tendencies: soul.identity.tendencies.clone(),
-                short_term_memory: soul.memories.iter().rev().take(15).map(|m| m.event_description.clone()).collect(),
+                short_term_memory: soul.memories.iter().rev().take(5).map(|m| m.event_description.clone()).collect(),
                 long_term_memory: vec![],
                 recalled_sensory_memories: vec![],
                 current_emotive_state: format!("Arousal: {:.2}, Valence: {:.2}, Battery: {:.0}%", 
@@ -850,18 +850,17 @@ async fn run_server(ui_path: PathBuf, core_dir: PathBuf) {
 
     println!("[INFO] xpod Core: Establishing Agentic Split-Brain Architecture...");
     
-    let resolved_repo = match cognitive_core.load_conversational_model_with_fallback(
-        "QuantFactory/Meta-Llama-3-8B-Instruct-GGUF",
-        "Meta-Llama-3-8B-Instruct.Q4_K_M.gguf",
-        "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
-        "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
-    ).await {
-        Ok(repo) => repo,
-        Err(e) => {
-            eprintln!("[FATAL] Could not resolve conversational LLM fallback protocol: {}", e);
-            std::process::exit(1);
-        }
-    };
+let resolved_repo = match cognitive_core.load_conversational_model_with_fallback(&[
+    ("TheBloke/Mistral-7B-Instruct-v0.2-GGUF",     "mistral-7b-instruct-v0.2.Q4_K_M.gguf",  "mistralai/Mistral-7B-Instruct-v0.2"),
+    ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",     "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",  "TinyLlama/TinyLlama-1.1B-Chat-v1.0"),
+    ("QuantFactory/Meta-Llama-3-8B-Instruct-GGUF",  "Meta-Llama-3-8B-Instruct.Q4_K_M.gguf",  "meta-llama/Meta-Llama-3-8B-Instruct"),
+]).await {
+    Ok(repo) => repo,
+    Err(e) => {
+        eprintln!("[FATAL] Could not resolve any conversational LLM: {}", e);
+        std::process::exit(1);
+    }
+};
 
     let prompts_file_path = core_dir.join("prompts.json");
 
